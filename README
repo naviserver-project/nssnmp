@@ -1,0 +1,186 @@
+SNMP Module for NaviServer 4.x
+Release 1.14
+vlad@crystalballinc.com
+
+This is NaviServer module that implements SNMP v1,v2c and some
+primitive MIB support, ICMP, RADIUS protocols. It is based on SNMP++
+library from http:://www.agentpp.com. It allows to use AOLserver as 
+SNMP trap server and build SNMP monitoring packages.
+
+/*--------------------------------------------------------------------*/
+
+Compiling and Installing
+
+To compile this driver, you'll need to have SNMP++ library compiled 
+and installed. NaviServer can be installed or source distribution may be used.
+
+Configuring
+
+Here is an nsd.tcl excerpt for configuring the SNMP module:
+
+ns_section      ns/server/${servername}/module/nssnmp
+ns_param	community	public
+ns_param	port		161
+ns_param	timeout		2
+ns_param	retries		2
+ns_param	version		1
+ns_param	bulk		20
+ns_param	trap_port	162
+ns_param	trap_proc	tcl_trap_handler
+ns_param	trap_address	127.0.0.1
+ns_param	idle_timeout	600
+ns_param	gc_interval	600
+
+Timeout is in seconds, version 1 is 0, version 2c is 1.
+In order to enable trap agent, trap_proc should be specified.
+All other parameters are optional, here are their default values.
+Without binder support, if trap_port is below 1000 it will be 
+increased by 1000.
+idle_timeout is in seconds, it defines inactivity period after which
+sessions will be closed by garbage collector which is called every 
+gc_interval seconds.
+
+
+ICMP sockets pre-allocation
+
+ns_param	icmp_ports	1
+
+Tells init module to pre-allocated specified number of raw sockets
+for ICMP pings.
+
+Usage
+
+There is ns_snmp command availabe to create SNMP sessions and make
+requests.
+  ns_snmp usage:
+
+     ns_snmp sessions
+       Outputs currenttly open connections as Tcl list:
+         id access_time host ...
+ 
+     ns_snmp gc
+        Calls session garbage collector which closes inactive sessions
+        according to idle_timeout parameter
+ 
+    ns_snmp create host {-port p -community c -timeout t -retries r -version 1|2 -bulk b}
+      creates new SNMP session for specified host. Optional parameters 
+      can be specified.
+      Example:
+         ns_snmp create localhost -community aaa -bulk 25 -timeout 30
+         Default SNMP version is 2c, some devices support only version 1
+
+    ns_snmp config #s name 
+      returns information about SNMP session
+      where name can be one of -address,-port,-writecommunity,-community,-timeout,-retries
+
+    ns_snmp get #s OID ...
+      retrieves one or more variables
+      Example:
+         set fd [ns_snmp create localhost]
+         set val [ns_snmp get $fd 1.3.6.1.2.1.2.2.1.6]
+
+    ns_snmp walk #s OID var script
+      walks SNMP MIB tree and executes script for every variable which is 
+      stored in specified Tcl variable var.
+      Example:
+         set fd [ns_snmp create localhost]
+         ns_snmp walk $fd 1.3.6.1.2.1.2.2.1 vb { ns_log debug VB: $vb }
+
+    ns_snmp set #s OID type value
+      sets SNMP variable with specified value
+      where type is:
+        i: INTEGER, u: unsigned INTEGER, t: TIMETICKS, a: IPADDRESS, o: OID, s: STRING
+      Example:
+         set fd [ns_snmp create localhost]
+         ns_snmp set $fd 1.3.6.1.2.1.1.1 s "Linux"
+
+    ns_snmp trap #s ID EnterpriseID ?oid type value ... ?
+    ns_snmp inform #s ID EnterpriseID ?oid type value ... ?
+      sends SNMP trap
+      where type is:
+        i: INTEGER, u: unsigned INTEGER, t: TIMETICKS, a: IPADDRESS, o: OID, s: STRING
+      Example:
+         set fd [ns_snmp create localhost]
+         ns_snmp trap $fd 1.3.6.1.6.3.1.1.5.1 1.3.6.1.2.1.1.1.2.0.1 1.3.6.1.2.1.1.1 s "Linux"
+
+    ns_snmp destroy $s
+      destroys SNMP session
+  
+  To receive traps the module should listens on SNMP trap port 162 or as 
+  specified in config file.
+
+  Trap config example:
+  ns_section ns/server/test_server/module/nssnmp
+  ns_param    trap_port      1187
+  ns_param    trap_address   127.0.0.1
+  ns_param    trap_proc      snmp_trap_handler
+
+  For each incoming SNMP trap it spawns separate thread and calls configured
+  Tcl proc. Inside that proc special command ns_trap is available with the following
+  parameters:
+  ns_trap oid|enterprise|type|vb|uptime|address
+    where
+      oid is notification OID
+      enterprise is Enterprise specific OID
+      uptime is timeticks
+      type is PDU type: TRAP|TRAP2
+      vb is variable bind list in format  { { oid type value } .. }
+
+  Primitive MIB support, maintains hash tabel with all known MIB
+  OID to label mapping.
+  ns_mib usage:
+
+    ns_mib set OID module label syntax hint enum(N) ...
+       create new MIB node with optional enum values for Integer
+
+    ns_mib info
+       returns the whole structure about given MIB node
+
+    ns_mib value OID value
+       returns enumeration name if exists or the same value
+
+    ns_mib name OID
+    ns_mib label OID
+    ns_mib module OID|label
+    ns_mib oid name
+    ns_mib syntax OID|label
+
+
+    ns_ping host {-count n -timeout n -size n}
+      performs ICMP ECHO queries
+      where
+        -count n specifies to send n ICMP packets
+        -timeout n specifies to wait n seconds for reply
+        -size n specifies n bytes of data to be sent
+        all these options are optional
+
+      returns the following Tcl list:
+       { requests_sent requests_received loss_percentage rtt_min rtt_avg rtt_max }
+
+    ns_radius host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...
+      performs RADIUS requests
+
+      Example:
+        ns_radius localhost 1645 secret User-Name test User-Password test2
+
+Nsmibdump
+
+  nsmibdump is utility that dumps MIB module or file into nsmib format. It uses 
+  libsmi library and can be used to extend MIB support in nssnmp.
+
+  To compile:
+
+  make nsmibdump
+
+  To dump MIB module, call it with module names as arguments.
+
+  nsmibdump IF-MIB
+
+  For example, to dump Cisco Tcp MIB use
+
+  nsmibdump ./CISCO-SMI.txt ./CISCO-TCP-MIB.txt
+
+Authors
+
+     Vlad Seryakov vlad@crystalballinc.com
+

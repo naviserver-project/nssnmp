@@ -1,0 +1,85 @@
+2004-10-15 Vlad Seryakov vlad@crystalballinc.com
+
+	* Added trap and inform to ns_snmp, ns_udp commands
+
+2004-09-29 Vlad Seryakov vlad@crystalballinc.com
+
+	* Added nsmibdump utility
+
+2004-09-19 Vlad Seryakov vlad@crystalballinc.com
+
+	* Added RADIUS client and server support
+
+2004-06-10 Vlad Seryakov vlad@crystalballinc.com
+
+	* updated to support Snmp++ version 3.2+
+
+2004-02-23 Vlad Seryakov vlad@crystalballinc.com
+
+	* ns_ping crashes due to bad result formatting
+
+2003-07-30 Vlad Seryakov vlad@crystalballinc.com
+
+	* ns_ping fixes
+
+2003-06-18 Vlad Seryakov vlad@crystalballinc.com
+
+	* Minor changes, new binder for aolserver4.
+
+2003-05-08 Scott Goodwin  <scott@scottg.net>
+
+        * Initial import into AOLserver SourceForge CVS
+
+2003-04-20 Vlad Seryakov vlad@crystalballinc.com
+
+	* Aolserver 4 support.
+
+2002-10-04 Vlad Seryakov vlad@crystalballinc.com
+
+	* Extended config command with -writecommunity option.
+
+2002-07-29 Vlad Seryakov vlad@crystalballinc.com
+
+	* Fixed bug in session destroy code.
+
+2002-05-24 Vlad Seryakov vlad@crystalballinc.com
+
+	* Added garbage collector and sessions commands.
+
+2002-04-20 Vlad Seryakov vlad@crystalballinc.com
+
+	* Bugfixes in walk procedure
+
+2001-12-27 Vlad Seryakov vlad@crystalballinc.com
+
+	* Added trap handler example procedure
+
+2001-12-18 Vlad Seryakov vlad@crystalballinc.com
+
+	* Fixed bug in walk error handling
+
+2001-12-10 Vlad Seryakov vlad@crystalballinc.com
+
+	* Fixed bug in handling Display-Hint
+
+2001-12-06 Vlad Seryakov vlad@crystalballinc.com
+
+	* Added Display-Hint support, ns_mib set format has been changed,
+	  requires re-creation of nsmib-procs.tcl file.
+
+2001-12-04 Vlad Seryakov vlad@crystalballinc.com
+
+	* Compilation problems with Linux and Solaris(Nikolay Blyumberg nickb@cv.net)
+
+2001-10-31 Vlad Seryakov vlad@crystalballinc.com
+
+	* Fixes in ICMP requests
+
+2001-10-25 Vlad Seryakov vlad@crystalballinc.com
+
+	* ICMP echo requests and ns_ping command are added
+
+2001-10-15 Vlad Seryakov vlad@crystalballinc.com
+
+	* Fixes in documentation
+	* added tnm_export routine to create ns_mib entries using scotty

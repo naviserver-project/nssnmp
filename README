@@ -4,7 +4,7 @@ vlad@crystalballinc.com
 
 This is NaviServer module that implements SNMP v1,v2c and some
 primitive MIB support, ICMP, RADIUS protocols. It is based on SNMP++
-library from http:://www.agentpp.com. It allows to use AOLserver as 
+library from http:://www.agentpp.com. It allows to use NaviServer as 
 SNMP trap server and build SNMP monitoring packages.
 
 /*--------------------------------------------------------------------*/

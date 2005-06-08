@@ -1,27 +1,26 @@
-
-/*
+/* 
  * The contents of this file are subject to the Mozilla Public License
- * Version 1.1 (the "License"); you may not use this file except in
+ * Version 1.1(the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
- * http://mozilla/.
+ * http://www.mozilla.org/.
  *
  * Software distributed under the License is distributed on an "AS IS"
- * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
+ * basis,WITHOUT WARRANTY OF ANY KIND,either express or implied. See
  * the License for the specific language governing rights and limitations
  * under the License.
  *
- * Copyright (C) 2001-2003 Vlad Seryakov
- * All rights reserved.
- *
- * Alternatively, the contents of this file may be used under the terms
- * of the GNU General Public License (the "GPL"), in which case the
+ * Alternatively,the contents of this file may be used under the terms
+ * of the GNU General Public License(the "GPL"),in which case the
  * provisions of GPL are applicable instead of those above.  If you wish
  * to allow use of your version of this file only under the terms of the
  * GPL and not to allow others to use your version of this file under the
- * License, indicate your decision by deleting the provisions above and
+ * License,indicate your decision by deleting the provisions above and
  * replace them with the notice and other provisions required by the GPL.
- * If you do not delete the provisions above, a recipient may use your
+ * If you do not delete the provisions above,a recipient may use your
  * version of this file under either the License or the GPL.
+ *
+ * Author Vlad Seryakov vlad@crystalballinc.com
+ * 
  */
 
 /*
@@ -2008,8 +2007,11 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
- * Revision 1.1  2005/05/20 20:47:23  seryakov
- * Initial revision
+ * Revision 1.2  2005/06/08 20:03:50  seryakov
+ * Changed license and wording in README files.
+ *
+ * Revision 1.1.1.1  2005/05/20 20:47:23  seryakov
+ * initial import
  *
  * Revision 1.18  2004/10/15 23:57:57  seryakov
  * *** empty log message ***

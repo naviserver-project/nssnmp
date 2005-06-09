@@ -1,3 +1,7 @@
+2005-06-09 Vlad Seryakov vlad@crystalballinc.com
+
+	* Rewrite ns_udp using new Objv interface
+
 2004-10-15 Vlad Seryakov vlad@crystalballinc.com
 
 	* Added trap and inform to ns_snmp, ns_udp commands

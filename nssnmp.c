@@ -2007,6 +2007,10 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.3  2005/06/09 21:31:30  seryakov
+ * rewrote nssnmp's ns_udp using new Objv interface, added to nsudp's ns_udp -retries
+ * parameter.
+ *
  * Revision 1.2  2005/06/08 20:03:50  seryakov
  * Changed license and wording in README files.
  *
@@ -3248,63 +3252,82 @@ static void RadiusInit()
  *
  *----------------------------------------------------------------------
  */
-static int UdpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[])
+static int
+UdpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[])
 {
-    fd_set rfds;
-    int retries = 0;
-    int timeout = 2;
-    struct timeval tm;
-    int fd,len,port;
+    fd_set fds;
+    char buf[16384];
+    struct timeval tv;
     struct sockaddr_in sa;
-    socklen_t salen = sizeof(sa);
-    char *ptr,buf[16384] = "";
+    int salen = sizeof(sa);
+    char *address = 0, *data = 0;
+    int sock, len, port, timeout = 5, retries = 1, noreply = 0;
+        
+    Ns_ObjvSpec opts[] = {
+        {"-timeout", Ns_ObjvInt,   &timeout, NULL},
+        {"-retries", Ns_ObjvInt,   &retries, NULL},
+        {"-noreply", Ns_ObjvInt,   &noreply, NULL},
+        {"--",      Ns_ObjvBreak,  NULL,    NULL},
+        {NULL, NULL, NULL, NULL}
+    };
+    Ns_ObjvSpec args[] = {
+        {"address",  Ns_ObjvString, &address, NULL},
+        {"port",  Ns_ObjvInt, &port, NULL},
+        {"data",  Ns_ObjvString, &data, &len},
+        {NULL, NULL, NULL, NULL}
+    };
 
-    if(objc < 4) {
-      Tcl_AppendResult(interp, "wrong # args: should be ns_udp host port data ?-retries retries? ?-timeout timeout?",NULL);
+    if (Ns_ParseObjv(opts, args, interp, 1, objc, objv) != NS_OK) {
       return TCL_ERROR;
     }
-    if(!(port = atoi(Tcl_GetString(objv[2]))) ||
-       Ns_GetSockAddr((sockaddr_in*)&sa,Tcl_GetString(objv[1]),port) != NS_OK) {
-      Tcl_AppendResult(interp,"noHost: unknown host:port",0);
-      return TCL_ERROR;
+    if (Ns_GetSockAddr(&sa, address, port) != NS_OK) {
+        sprintf(buf, "%s:%d", address, port);
+        Tcl_AppendResult(interp, "invalid address ", address, 0);
+        return TCL_ERROR;
     }
-    for(int i = 4;i < objc - 1;i += 2) {
-      if(!strcasecmp(Tcl_GetString(objv[i]),"-retries")) retries = atoi(Tcl_GetString(objv[i+1])); else
-      if(!strcasecmp(Tcl_GetString(objv[i]),"-timeout")) timeout = atoi(Tcl_GetString(objv[i+1]));
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        Tcl_AppendResult(interp, "socket error ", strerror(errno), 0);
+        return TCL_ERROR;
     }
-    if((fd = socket(AF_INET,SOCK_DGRAM,0)) < 0) {
-      Tcl_AppendResult(interp,"noResponse: ",strerror(errno),0);
-      return -1;
+resend:
+    if (sendto(sock, data, len, 0,(struct sockaddr*)&sa,sizeof(sa)) < 0) {
+        Tcl_AppendResult(interp, "sendto error ", strerror(errno), 0);
+        return TCL_ERROR;
     }
-    ptr = Tcl_GetStringFromObj(objv[3],&len);
+    if (noreply) {
+        close(sock);
+        return TCL_OK;
+    }
+    memset(buf,0,sizeof(buf));
+    Ns_SockSetNonBlocking(sock);
 again:
-    if(sendto(fd,ptr,len,0,(struct sockaddr *)&sa,sizeof(struct sockaddr_in)) <= 0) {
-      Tcl_AppendResult(interp,"noResponse: ",strerror(errno),0);
-      close(fd);
-      return TCL_ERROR;
+    FD_ZERO(&fds);
+    FD_SET(sock,&fds);
+    tv.tv_sec = timeout;
+    tv.tv_usec = 0;
+    len = select(sock+1, &fds, 0, 0, &tv);
+    switch (len) {
+     case -1:
+         if (errno == EINTR || errno == EINPROGRESS || errno == EAGAIN) {
+             goto again;
+         }
+         Tcl_AppendResult(interp, "select error ", strerror(errno), 0);
+         close(sock);
+         return TCL_ERROR;
+
+     case 0:
+         if(--retries > 0) goto resend;
+         Tcl_AppendResult(interp, "timeout", 0);
+         close(sock);
+         return TCL_ERROR;
     }
-    tm.tv_usec = 0L;
-    tm.tv_sec = timeout;
-    FD_ZERO(&rfds);
-    FD_SET(fd,&rfds);
-    if(select(fd + 1,&rfds,0,0,&tm) < 0) {
-      if(errno == EINTR) goto again;
-      Tcl_AppendResult(interp,"noResponse: ",strerror(errno),0);
-      close(fd);
-      return TCL_ERROR;
+    if (FD_ISSET(sock, &fds)) {
+        len = recvfrom(sock, buf, sizeof(buf)-1, 0, (struct sockaddr*)&sa, (socklen_t*)&salen);
+        if (len > 0) {
+            Tcl_AppendResult(interp, buf, 0);
+        }
     }
-    if(!FD_ISSET(fd,&rfds)) {
-      if(--retries > 0) goto again;
-      Tcl_AppendResult(interp,"noResponse: timeout",0);
-      close(fd);
-      return TCL_ERROR;
-    }
-    if((len = recvfrom(fd,buf,sizeof(buf)-1,0,(struct sockaddr*)&sa,(socklen_t*)&salen)) <= 0) {
-      Tcl_AppendResult(interp,"noResponse: ",strerror(errno),0);
-      close(fd);
-      return TCL_ERROR;
-    }
-    close(fd);
-    Tcl_SetObjResult(interp,Tcl_NewStringObj(buf,len));
+    close(sock);
     return TCL_OK;
 }

@@ -453,13 +453,13 @@ extern int receive_snmp_notification(int sock, Snmp &snmp_session,Pdu &pdu, Snmp
 static int UdpListen(char *address,int port);
 static int UdpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[]);
 static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[]);
-static int TrapCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv);
-static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv);
-static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv);
-static int IcmpCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv);
-static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv);
-static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv);
-static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv);
+static int TrapCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
+static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
+static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
+static int IcmpCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
+static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
+static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
+static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
 static void TrapDump(Server *server,Pdu &pdu,SnmpTarget &target);
 static const char *SnmpError(SnmpSession *session,int status);
 static int SnmpInterpInit(Tcl_Interp *interp, void *context);
@@ -711,7 +711,7 @@ static void TrapThread(void *arg)
  *----------------------------------------------------------------------
  */
 
-static int TrapCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
+static int TrapCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
 {
     TrapContext *ctx = (TrapContext *)arg;
 
@@ -944,7 +944,7 @@ static void SessionGC(void *arg)
     for(session = (SnmpSession*)server->sessions;session;) {
       if(now - session->access_time > server->idle_timeout) {
         SnmpSession *next = (SnmpSession*)session->next;
-        Ns_Log(Notice,"ns_snmp: GC: inactive session %d: %s",session->id,session->addr->get_printable());
+        Ns_Log(Notice,"ns_snmp: GC: inactive session %ld: %s",session->id,session->addr->get_printable());
         SessionUnlink(server,session,0);
         session = next;
         continue;
@@ -1079,15 +1079,15 @@ static int SyntaxValid(int syntax)
 static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[])
 {
     Server *server = (Server*)arg;
-    int status,id;
+    int cmd,status,id;
     SnmpSession *session;
     enum commands {
         cmdGc, cmdSessions, cmdCreate,
         cmdConfig, cmdGet, cmdWalk, cmdSet, 
         cmdTrap, cmdInform, cmdDestroy
-    } cmd;
+    };
 
-    static char *sCmd[] = {
+    static const char *sCmd[] = {
         "gc", "sessions", "create",
         "config", "get", "walk", "set", 
         "trap", "inform", "destroy", 0
@@ -1474,7 +1474,7 @@ int SnmpVb::SetValue(char *type,char *value)
    return TCL_OK;
 }
 
-static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
+static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
 {
     Server *server = (Server*)arg;
     MibEntry *mib = 0;
@@ -1487,8 +1487,8 @@ static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
     }
 
     if(!strcmp(argv[1],"labels")) {
-      char *pattern = (argc > 2 ? argv[2] : 0);
-      char *syntax = (argc > 3 ? argv[3] : 0);
+      char *pattern = (argc > 2 ? (char*)argv[2] : 0);
+      char *syntax = (argc > 3 ? (char*)argv[3] : 0);
       Tcl_HashSearch search;
 
       Ns_MutexLock(&server->mibMutex);
@@ -1613,16 +1613,16 @@ static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
             }
         } else
         if(mib->hint) {
-          FormatIntTC(interp,argv[3],mib->hint);
+          FormatIntTC(interp,(char*)argv[3],mib->hint);
           return TCL_OK;
         }
       } else
 
       if(!strcmp(mib->syntax,"OCTET STRING") && mib->hint) {
-        FormatStringTC(interp,argv[3],mib->hint);
+        FormatStringTC(interp,(char*)argv[3],mib->hint);
         return TCL_OK;
       }
-      Tcl_AppendResult(interp,argv[3],0);
+      Tcl_AppendResult(interp,(char*)argv[3],0);
     } else
 
     if(!strcmp(argv[1],"module")) {
@@ -1718,7 +1718,7 @@ static void IcmpUnlock(Server *server,int fd)
 }
 
 // Check host availability by simulating PING
-static int IcmpCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
+static int IcmpCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
 {
    Server *server = (Server*)arg;
    IcmpPort *icmp;
@@ -1741,7 +1741,7 @@ static int IcmpCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
 }
 
 // Check host availability by simulating PING
-static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
+static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
 {
    Server *server = (Server*)arg;
    if (argc < 2) {
@@ -1779,7 +1779,7 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
    struct icmp *icp;
    fd_set fds;
 
-   if(Ns_GetSockAddr(&addr,argv[1],0) != NS_OK) {
+   if(Ns_GetSockAddr(&addr,(char*)argv[1],0) != NS_OK) {
      Tcl_AppendResult(interp,"noHost: unknown host: ",argv[1],0);
      return TCL_ERROR;
    }
@@ -2007,6 +2007,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.4  2005/06/12 22:34:24  seryakov
+ * compiler warnings silence
+ *
  * Revision 1.3  2005/06/09 21:31:30  seryakov
  * rewrote nssnmp's ns_udp using new Objv interface, added to nsudp's ns_udp -retries
  * parameter.
@@ -2762,7 +2765,7 @@ static RadiusClient *RadiusClientFind(Server *server,struct in_addr addr,int unl
  *
  *----------------------------------------------------------------------
  */
-static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
+static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
 {
     fd_set rfds;
     Ns_DString ds;
@@ -2783,7 +2786,7 @@ static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
       return TCL_ERROR;
     }
     if(!(port = atoi(argv[2]))) port = RADIUS_AUTH_PORT;
-    if(Ns_GetSockAddr((sockaddr_in*)&sa,argv[1],port) != NS_OK) {
+    if(Ns_GetSockAddr((sockaddr_in*)&sa,(char*)argv[1],port) != NS_OK) {
       Tcl_AppendResult(interp,"noHost: unknown host: ",argv[1],0);
       return TCL_ERROR;
     }
@@ -2791,7 +2794,7 @@ static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
       if(!strcasecmp(argv[i],"Code")) code = atoi(argv[i+1]); else
       if(!strcasecmp(argv[i],"Retries")) retries = atoi(argv[i+1]); else
       if(!strcasecmp(argv[i],"Timeout")) timeout = atoi(argv[i+1]); else {
-        if((attr = RadiusAttrCreate(argv[i],0,0,(unsigned char*)argv[i+1],-1)))
+        if((attr = RadiusAttrCreate((char*)argv[i],0,0,(unsigned char*)argv[i+1],-1)))
           RadiusAttrLink(&vp,attr);
         else {
           Tcl_AppendResult(interp,"unknown attribute ",argv[i]," ",argv[i+1],0);
@@ -2807,7 +2810,7 @@ static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
     // Build an request
     hdr = (RadiusHeader *)buffer;
     RadiusVectorCreate(vector);
-    RadiusHeaderPack(hdr,0,code,vector,vp,argv[3]);
+    RadiusHeaderPack(hdr,0,code,vector,vp,(char*)argv[3]);
     RadiusAttrFree(&vp);
     memcpy(vector,hdr->vector,RADIUS_VECTOR_LEN);
     id = hdr->id;
@@ -2846,13 +2849,13 @@ again:
       return TCL_ERROR;
     }
     // Verify reply md5 digest
-    if(RadiusVectorVerify(hdr,vector,argv[3])) {
+    if(RadiusVectorVerify(hdr,vector,(char*)argv[3])) {
       Tcl_AppendResult(interp,"noResponse: invalid reply digest",0);
       return TCL_ERROR;
     }
     Ns_DStringInit(&ds);
     Ns_DStringPrintf(&ds,"code %d id %d ipaddr %s ",hdr->code,hdr->id,ns_inet_ntoa(sa.sin_addr));
-    if((vp = RadiusAttrParse(hdr,len,argv[3]))) {
+    if((vp = RadiusAttrParse(hdr,len,(char*)argv[3]))) {
       RadiusAttrPrintf(vp,&ds,1,1);
       RadiusAttrFree(&vp);
     }
@@ -2876,7 +2879,7 @@ again:
  *
  *----------------------------------------------------------------------
  */
-static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
+static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
 {
     int n;
     Ns_DString ds;
@@ -2903,7 +2906,7 @@ static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, char **ar
       if(!strcmp(argv[5],"ipaddr")) n = RADIUS_TYPE_IPADDR; else
       if(!strcmp(argv[5],"date")) n = RADIUS_TYPE_DATE; else n = atoi(argv[5]);
       if(!RadiusDictFind(atoi(argv[3]),atoi(argv[4]),0))
-        RadiusDictAdd(argv[2],atoi(argv[3]),atoi(argv[4]),n);
+        RadiusDictAdd((char*)argv[2],atoi(argv[3]),atoi(argv[4]),n);
     } else
     if(!strcmp(argv[1],"get")) {
       if(argc < 3) {
@@ -2913,7 +2916,7 @@ static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, char **ar
       if((n = atoi(argv[2])) > 0)
         dict = RadiusDictFind(n,argc > 3 ? atoi(argv[3]): 0,1);
       else
-        dict = RadiusDictFindName(argv[2],argc > 3 ? atoi(argv[3]): 0,1);
+        dict = RadiusDictFindName((char*)argv[2],argc > 3 ? atoi(argv[3]): 0,1);
       if(dict) {
         char buffer[256];
         sprintf(buffer,"%s %d %d",dict->name,dict->vendor,dict->type);
@@ -2928,7 +2931,7 @@ static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, char **ar
       if((n = atoi(argv[2])) > 0)
         dict = RadiusDictFind(n,argc > 3 ? atoi(argv[3]): 0,1);
       else
-        dict = RadiusDictFindName(argv[2],argc > 3 ? atoi(argv[3]): 0,1);
+        dict = RadiusDictFindName((char*)argv[2],argc > 3 ? atoi(argv[3]): 0,1);
       ns_free(dict);
     }
     return TCL_OK;
@@ -2949,7 +2952,7 @@ static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, char **ar
  *
  *----------------------------------------------------------------------
  */
-static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
+static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
 {
     Ns_DString ds;
     struct sockaddr_in addr;
@@ -2965,7 +2968,7 @@ static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, char **
         Tcl_AppendResult(interp, "wrong # args: should be ",argv[0]," get host",NULL);
         return TCL_ERROR;
       }
-      if(Ns_GetSockAddr(&addr,argv[2],0) == NS_OK && (client = RadiusClientFind(server,addr.sin_addr,0)))
+      if(Ns_GetSockAddr(&addr,(char*)argv[2],0) == NS_OK && (client = RadiusClientFind(server,addr.sin_addr,0)))
         Tcl_AppendResult(interp,client->secret,0);
     } else
 
@@ -2974,7 +2977,7 @@ static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, char **
         Tcl_AppendResult(interp, "wrong # args: should be ",argv[0]," add host secret",NULL);
         return TCL_ERROR;
       }
-      RadiusClientAdd(server,argv[2],argv[3]);
+      RadiusClientAdd(server,(char*)argv[2],(char*)argv[3]);
     } else
 
     if(!strcmp(argv[1],"del")) {
@@ -2982,7 +2985,7 @@ static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, char **
         Tcl_AppendResult(interp, "wrong # args: should be ",argv[0]," del host",NULL);
         return TCL_ERROR;
       }
-      if(Ns_GetSockAddr(&addr,argv[2],0) == NS_OK) client = RadiusClientFind(server,addr.sin_addr,1);
+      if(Ns_GetSockAddr(&addr,(char*)argv[2],0) == NS_OK) client = RadiusClientFind(server,addr.sin_addr,1);
       ns_free(client);
     } else
 
@@ -3011,7 +3014,7 @@ static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, char **
  *----------------------------------------------------------------------
  */
 
-static int RadiusReqCmd(ClientData arg, Tcl_Interp *interp, int argc, char **argv)
+static int RadiusReqCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
 {
     Ns_DString ds;
     RadiusAttr *attr;
@@ -3041,7 +3044,7 @@ static int RadiusReqCmd(ClientData arg, Tcl_Interp *interp, int argc, char **arg
         Ns_DStringAppend(&ds,ns_inet_ntoa(req->addr.sin_addr));
       } else
       if((atoi(argv[2]) > 0 && (attr = RadiusAttrFind(req->req,atoi(argv[2]),vendor))) ||
-         (attr = RadiusAttrFindName(req->req,argv[2],vendor))) {
+         (attr = RadiusAttrFindName(req->req,(char*)argv[2],vendor))) {
         RadiusAttrPrintf(attr,&ds,0,0);
       }
       Tcl_AppendResult(interp,ds.string,0);
@@ -3053,7 +3056,7 @@ static int RadiusReqCmd(ClientData arg, Tcl_Interp *interp, int argc, char **arg
         if(!strcmp(argv[i],"code"))
           req->reply_code = atoi(argv[i+1]);
         else
-        if((attr = RadiusAttrCreate(argv[i],atoi(argv[i]),0,(unsigned char*)argv[i+1],-1)))
+        if((attr = RadiusAttrCreate((char*)argv[i],atoi(argv[i]),0,(unsigned char*)argv[i+1],-1)))
           RadiusAttrLink(&req->reply,attr);
       }
     } else

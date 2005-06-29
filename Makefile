@@ -28,7 +28,7 @@ PROCS	= nsmib_procs.tcl
 CLEAN   += clean-bak
 INSTALL += install-procs
 
-CFLAGS	 = -I$(SNMPINC) -I/usr/local/aolserver/include
+CFLAGS	 += -I$(SNMPINC)
 MODLIBS	 = $(SNMPLIB)
 
 include  $(NAVISERVER)/include/Makefile.module

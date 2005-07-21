@@ -1765,7 +1765,7 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **ar
 #else
    int slen = sizeof(struct sockaddr);
 #endif
-   int start_time;
+   time_t start_time;
    int size = 56;
    char buf[4096];
    float delay;
@@ -2011,6 +2011,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.6  2005/07/21 14:44:39  seryakov
+ * *** empty log message ***
+ *
  * Revision 1.5  2005/07/21 14:40:19  seryakov
  * fixed bug in ns_ping
  *

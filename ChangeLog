@@ -1,3 +1,7 @@
+2005-07-21 Vlad Seryakov vlad@crystalballinc.com
+
+	* fixed timeout bug in ns_ping
+
 2005-06-09 Vlad Seryakov vlad@crystalballinc.com
 
 	* Rewrite ns_udp using new Objv interface

@@ -1745,7 +1745,7 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **ar
 {
    Server *server = (Server*)arg;
    if (argc < 2) {
-     Tcl_AppendResult(interp, "wrong # args: should be \"",argv[0], " host","\"", NULL);
+     Tcl_AppendResult(interp, "wrong # args: should be \"",argv[0], " host","\" ?-timeout n? ?-debug 0|1? ?-count n? ?-size n?", NULL);
      return TCL_ERROR;
    }
    int i;
@@ -1765,6 +1765,7 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **ar
 #else
    int slen = sizeof(struct sockaddr);
 #endif
+   int start_time;
    int size = 56;
    char buf[4096];
    float delay;
@@ -1798,6 +1799,7 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **ar
    Ns_MutexLock(&server->icmp.mutex);
    if((id = ++server->icmp.id) > 65535) id = 1;
    Ns_MutexUnlock(&server->icmp.mutex);
+   start_time = time(0);
 
    for(i = 0; i < count;i++) {
      icp = (struct icmp *)buf;
@@ -1819,6 +1821,8 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **ar
      sent++;
      retry_count = 0;
 again:
+     // Check the total time we spent pinging
+     if(time(0) - start_time > timeout) break;
      FD_ZERO(&fds);
      FD_SET(fd,&fds);
      t2.tv_usec = 0;
@@ -2007,6 +2011,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.5  2005/07/21 14:40:19  seryakov
+ * fixed bug in ns_ping
+ *
  * Revision 1.4  2005/06/12 22:34:24  seryakov
  * compiler warnings silence
  *

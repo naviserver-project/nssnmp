@@ -1,3 +1,7 @@
+2005-08-01 Vlad Seryakov vlad@crystalballinc.com
+
+	* removed old compat functions
+
 2005-07-21 Vlad Seryakov vlad@crystalballinc.com
 
 	* fixed timeout bug in ns_ping

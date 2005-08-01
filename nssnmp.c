@@ -514,20 +514,20 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     Tcl_InitHashTable(&serverPtr->mib,TCL_STRING_KEYS);
     if(!Ns_ConfigGetInt(path,"idle_timeout",&serverPtr->idle_timeout)) serverPtr->idle_timeout = 600;
     if(!Ns_ConfigGetInt(path,"gc_interval",&serverPtr->gc_interval)) serverPtr->gc_interval = 600;
-    if(!(serverPtr->community = Ns_ConfigGet(path,"community"))) serverPtr->community = "public";
-    if(!(serverPtr->writecommunity = Ns_ConfigGet(path,"writecommunity"))) serverPtr->writecommunity = "private";
+    if(!(serverPtr->community = Ns_ConfigGetValue(path,"community"))) serverPtr->community = "public";
+    if(!(serverPtr->writecommunity = Ns_ConfigGetValue(path,"writecommunity"))) serverPtr->writecommunity = "private";
     if(!Ns_ConfigGetInt(path,"port",&serverPtr->port)) serverPtr->port = 161;
     if(!Ns_ConfigGetInt(path,"timeout",&serverPtr->timeout)) serverPtr->timeout = 2;
     if(!Ns_ConfigGetInt(path,"retries",&serverPtr->retries)) serverPtr->retries = 2;
     if(!Ns_ConfigGetInt(path,"version",&serverPtr->version)) serverPtr->version = 2;
     if(!Ns_ConfigGetInt(path,"bulk",&serverPtr->bulk)) serverPtr->bulk = 10;
     if(!Ns_ConfigGetInt(path,"trap_port",&serverPtr->trap.port)) serverPtr->trap.port = 162;
-    if(!(serverPtr->trap.address = Ns_ConfigGet(path,"trap_address"))) serverPtr->trap.address = "0.0.0.0";
-    serverPtr->trap.proc = Ns_ConfigGet(path,"trap_proc");
+    if(!(serverPtr->trap.address = Ns_ConfigGetValue(path,"trap_address"))) serverPtr->trap.address = "0.0.0.0";
+    serverPtr->trap.proc = Ns_ConfigGetValue(path,"trap_proc");
     if(!Ns_ConfigGetInt(path,"radius_auth_port",&serverPtr->radius.auth_port)) serverPtr->radius.auth_port = RADIUS_AUTH_PORT;
     if(!Ns_ConfigGetInt(path,"radius_acct_port",&serverPtr->radius.acct_port)) serverPtr->radius.acct_port = RADIUS_ACCT_PORT;
-    if(!(serverPtr->radius.address = Ns_ConfigGet(path,"radius_address"))) serverPtr->radius.address = "0.0.0.0";
-    serverPtr->radius.proc = Ns_ConfigGet(path,"radius_proc");
+    if(!(serverPtr->radius.address = Ns_ConfigGetValue(path,"radius_address"))) serverPtr->radius.address = "0.0.0.0";
+    serverPtr->radius.proc = Ns_ConfigGetValue(path,"radius_proc");
 
     // Initialize ICMP system
     if(Ns_ConfigGetInt(path, "icmp_ports", &serverPtr->icmp.count) > 0) {
@@ -592,8 +592,8 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     Ns_MutexSetName2(&radiusDictMutex,"nssnmp","radiusDict");
     Ns_MutexSetName2(&serverPtr->radius.clientMutex,"nssnmp","radiusClient");
     Ns_MutexSetName2(&serverPtr->radius.requestMutex,"nssnmp","radiusRequest");
-
-    return Ns_TclInitInterps(server, SnmpInterpInit, serverPtr);
+    Ns_TclRegisterTrace(server, SnmpInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
+    return NS_OK;
 }
 
 }
@@ -2011,6 +2011,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.7  2005/08/01 19:47:45  seryakov
+ * removed old compat functions
+ *
  * Revision 1.6  2005/07/21 14:44:39  seryakov
  * *** empty log message ***
  *

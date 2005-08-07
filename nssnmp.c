@@ -2011,6 +2011,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.8  2005/08/07 22:15:09  seryakov
+ * added support of broadcasting to all udp commands
+ *
  * Revision 1.7  2005/08/01 19:47:45  seryakov
  * removed old compat functions
  *
@@ -3277,7 +3280,7 @@ UdpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[])
     struct sockaddr_in sa;
     int salen = sizeof(sa);
     char *address = 0, *data = 0;
-    int sock, len, port, timeout = 5, retries = 1, noreply = 0;
+    int i, sock, len, port, timeout = 5, retries = 1, noreply = 0;
         
     Ns_ObjvSpec opts[] = {
         {"-timeout", Ns_ObjvInt,   &timeout, NULL},
@@ -3306,6 +3309,10 @@ UdpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[])
         Tcl_AppendResult(interp, "socket error ", strerror(errno), 0);
         return TCL_ERROR;
     }
+    /* To support brodcasting addresses */
+    i = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &i, sizeof(int));
+
 resend:
     if (sendto(sock, data, len, 0,(struct sockaddr*)&sa,sizeof(sa)) < 0) {
         Tcl_AppendResult(interp, "sendto error ", strerror(errno), 0);

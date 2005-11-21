@@ -1,3 +1,7 @@
+2005-11-21 Vlad Seryakov vlad@crystalballinc.com
+
+	* fixed icmp id overload condition
+        
 2005-08-01 Vlad Seryakov vlad@crystalballinc.com
 
 	* removed old compat functions

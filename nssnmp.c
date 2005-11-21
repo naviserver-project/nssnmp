@@ -1797,7 +1797,7 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **ar
    }
    // Allocate unique id
    Ns_MutexLock(&server->icmp.mutex);
-   if((id = ++server->icmp.id) > 65535) id = 1;
+   if((id = ++server->icmp.id) > 65535) server->icmp.id = id = 1;
    Ns_MutexUnlock(&server->icmp.mutex);
    start_time = time(0);
 
@@ -2011,6 +2011,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.9  2005/11/21 18:18:14  seryakov
+ * *** empty log message ***
+ *
  * Revision 1.8  2005/08/07 22:15:09  seryakov
  * added support of broadcasting to all udp commands
  *

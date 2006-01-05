@@ -1,3 +1,7 @@
+2006-01-05 Vlad Seryakov vlad@crystalballinc.com
+
+	* added debug option to snmp traps
+
 2005-11-21 Vlad Seryakov vlad@crystalballinc.com
 
 	* fixed icmp id overload condition

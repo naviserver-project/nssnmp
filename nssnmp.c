@@ -378,6 +378,7 @@ typedef struct _server {
    char *name;
    char *community;
    char *writecommunity;
+   int debug;
    int port;
    int bulk;
    int timeout;
@@ -512,6 +513,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     serverPtr = (Server*)ns_calloc(1,sizeof(Server));
     serverPtr->name = server;
     Tcl_InitHashTable(&serverPtr->mib,TCL_STRING_KEYS);
+    if(!Ns_ConfigGetInt(path,"debug",&serverPtr->debug)) serverPtr->debug = 0;
     if(!Ns_ConfigGetInt(path,"idle_timeout",&serverPtr->idle_timeout)) serverPtr->idle_timeout = 600;
     if(!Ns_ConfigGetInt(path,"gc_interval",&serverPtr->gc_interval)) serverPtr->gc_interval = 600;
     if(!(serverPtr->community = Ns_ConfigGetValue(path,"community"))) serverPtr->community = "public";
@@ -651,7 +653,9 @@ static int TrapProc(SOCKET sock,void *arg,int why)
     Server *server = (Server*)arg;
     TrapContext *ctx = new TrapContext(server);
     if(!receive_snmp_notification(sock,*server->trap.snmp,ctx->pdu,&ctx->target)) {
-      TrapDump(server,ctx->pdu,*ctx->target);
+      if (server->debug) {
+          TrapDump(server,ctx->pdu,*ctx->target);
+      }
       /* SNMP inform trap requires response */
       if (ctx->pdu.get_type() == sNMP_PDU_INFORM) {
         Pdu pdu = ctx->pdu;
@@ -2011,6 +2015,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.10  2006/01/05 15:36:33  seryakov
+ * added debug config option
+ *
  * Revision 1.9  2005/11/21 18:18:14  seryakov
  * *** empty log message ***
  *

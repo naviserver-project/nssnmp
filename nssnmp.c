@@ -173,7 +173,7 @@ extern "C" {
 
 #include "snmp_pp/snmp_pp.h"
 
-#define VERSION  "1.14"
+#define SNMP_VERSION  "1.14"
 
 typedef struct _icmpPort {
   struct _icmpPort *next,*prev;
@@ -507,7 +507,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     int status;
     Server *serverPtr;
 
-    Ns_Log(Notice, "nssnmp module version %s server: %s", VERSION,server);
+    Ns_Log(Notice, "nssnmp module version %s server: %s", SNMP_VERSION,server);
 
     path = Ns_ConfigGetPath(server,module,NULL);
     serverPtr = (Server*)ns_calloc(1,sizeof(Server));
@@ -2015,6 +2015,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.11  2006/01/24 15:36:04  seryakov
+ * Changed all modules to new Ns_Sock timeout API
+ *
  * Revision 1.10  2006/01/05 15:36:33  seryakov
  * added debug config option
  *

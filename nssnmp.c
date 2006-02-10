@@ -1520,7 +1520,7 @@ static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **arg
         Tcl_AppendResult(interp,argv[0]," set oid module label syntax hint enum(N) ...",0);
         return TCL_ERROR;
       }
-      int flag;
+      int flag, enumidx = 7;
       Ns_MutexLock(&server->mibMutex);
       entry = Tcl_CreateHashEntry(&server->mib,argv[2],&flag);
       if(flag) {
@@ -1529,10 +1529,16 @@ static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **arg
         mib->module = strdup(argv[3]);
         mib->label = strdup(argv[4]);
         mib->syntax = strdup(argv[5]);
-        if(argc > 6 && argv[6][0]) mib->hint = strdup(argv[6]);
-        /* Enumeration for integer type */
+        /* Enumeration for integer type, hint can be skipped */
         if(!strcmp(argv[5],"Integer32")) {
-          for(int i = 7;i < argc; i++) {
+          if(argc > 6 && argv[6][0]) {
+            if(strchr(argv[6],'(')) {
+              enumidx = 6;
+            } else {
+              mib->hint = strdup(argv[6]);
+            }
+          }
+          for(int i = enumidx;i < argc; i++) {
             char *s = strchr(argv[i],'(');
             if(!s) break;
             char *e = strchr(s,')');
@@ -1544,7 +1550,11 @@ static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **arg
             mib->Enum.names[mib->Enum.count-1] = ns_strdup(argv[i]);
             mib->Enum.values[mib->Enum.count-1] = atoi(s);
           }
+        } else
+        if(argc > 6 && argv[6][0]) {
+          mib->hint = strdup(argv[6]);
         }
+
         Tcl_SetHashValue(entry,mib);
         entry = Tcl_CreateHashEntry(&server->mib,argv[4],&flag);
         Tcl_SetHashValue(entry,mib);
@@ -2015,6 +2025,9 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.12  2006/02/10 18:03:25  seryakov
+ * ignore hint in ns_mib set when enums are specified
+ *
  * Revision 1.11  2006/01/24 15:36:04  seryakov
  * Changed all modules to new Ns_Sock timeout API
  *

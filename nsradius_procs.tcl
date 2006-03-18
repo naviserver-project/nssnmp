@@ -1,19 +1,29 @@
-# Simple RADIUS server
+# Author: Vlad Seryakov vlad@crystalballinc.com
+# March 2006
 
-proc RadiusServer {} {
+namespace eval radius {
 
-    ns_log debug Request: [ns_radius reqlist]
+    variable debug 0
+}
+
+proc radius::server { args } {
+
+    variable debug
+    
+    if { $debug } {
+      ns_log notice Request: [ns_radius reqlist]
+    }
     switch -- [ns_radius reqget code] {
      1 {
+       # Authentication request
        set ok 0
        set name [ns_radius reqget User-Name]
        set passwd [ns_radius reqget User-Password]
-       ns_log debug User $name Password $passwd
        set user [ns_radius userfind $name]
        foreach { key val } [lindex $user 0] {
          switch -- $key {
-          password {
-            if { $password == $val } {
+          user-password {
+            if { $passwd == $val } {
               set ok 1
             }
           }
@@ -25,13 +35,18 @@ proc RadiusServer {} {
          }
        }
        if { $ok } {
-         ns_radius reqset code 2 Reply-Message Verified
+         ns_radius reqset code 2 Reply-Message OK
          foreach { key val } [lindex $user 1] {
            ns_radius reqset $key $val
          }
        } else {
-         ns_radius reqset code 3 Reply-Message "Wrong username/password"
+         ns_radius reqset code 3 Reply-Message Failed
        }
+     }
+     
+     4 {
+       # Accounting request
+       ns_radius reqset code 5
      }
     }
 }

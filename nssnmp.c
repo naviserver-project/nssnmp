@@ -641,8 +641,8 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     }
     /* Schedule garbage collection proc for automatic session close/cleanup */
     if (serverPtr->gc_interval > 0) {
-         Ns_ScheduleProc(SessionGC, serverPtr, 1, serverPtr->gc_interval);
-         Ns_Log(Notice,"ns_snmp: scheduling GC proc for every %d secs", serverPtr->gc_interval);
+        Ns_ScheduleProc(SessionGC, serverPtr, 1, serverPtr->gc_interval);
+        Ns_Log(Notice,"ns_snmp: scheduling GC proc for every %d secs", serverPtr->gc_interval);
     }
     Ns_MutexSetName2(&serverPtr->snmpMutex, "nssnmp", "snmp");
     Ns_MutexSetName2(&serverPtr->mibMutex, "nssnmp", "mib");
@@ -2212,6 +2212,9 @@ static void FormatIntTC(Tcl_Interp *interp, char *bytes, char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.15  2006/03/18 05:50:50  seryakov
+ * RADIUS server completion, full dictinary support
+ *
  * Revision 1.14  2006/03/18 04:13:19  seryakov
  * For Linux systems use native crypt which supports MD5 digests, increase encryption buffer
  *
@@ -2587,10 +2590,15 @@ static RadiusDict *RadiusDictAdd(Server *server, char *name, int attr, int vendo
 static void RadiusDictPrintf(Server *server, Ns_DString *ds)
 {
     RadiusDict *dict;
+    RadiusValue *value;
 
     Ns_MutexLock(&server->radius.dictMutex);
     for (dict = server->radius.dictList; dict; dict = dict->next) {
-        Ns_DStringPrintf(ds, "%s %d %d %d ", dict->name, dict->attribute, dict->vendor, dict->type);
+        Ns_DStringPrintf(ds, "%s %d %d %d {", dict->name, dict->attribute, dict->vendor, dict->type);
+        for (value = dict->values; value; value = value->next) {
+            Ns_DStringPrintf(ds, "%s %d ", value->name, value->value);
+        }
+        Ns_DStringPrintf(ds, "} ");
     }
     Ns_MutexUnlock(&server->radius.dictMutex);
 }
@@ -2676,7 +2684,9 @@ static void RadiusPasswdEncrypt(RadiusAttr *attr, RadiusVector vector, char *sec
             MD5Calc(digest, md5, secretlen + RADIUS_VECTOR_LEN);
         }
         p = &pw[i];
-        for (j = 0; j < RADIUS_VECTOR_LEN; j++,  i++) pw[i] ^= digest[j];
+        for (j = 0; j < RADIUS_VECTOR_LEN; j++,  i++) {
+            pw[i] ^= digest[j];
+        }
     }
     attr->lval = chunks * RADIUS_VECTOR_LEN;
     memcpy(attr->sval, pw, RADIUS_STRING_LEN);
@@ -2685,7 +2695,8 @@ static void RadiusPasswdEncrypt(RadiusAttr *attr, RadiusVector vector, char *sec
 static RadiusAttr *RadiusAttrCreate(Server *server, char *name, int attr, int vendor, char *val, int len)
 {
     RadiusAttr *vp;
-    RadiusDict *dict = 0;
+    RadiusDict *dict;
+    RadiusValue *value;
 
     dict = RadiusDictFind(server, name, attr, vendor, 0);
     if (!dict && attr <= 0) {
@@ -2712,16 +2723,25 @@ static RadiusAttr *RadiusAttrCreate(Server *server, char *name, int attr, int ve
          vp->lval = len < RADIUS_STRING_LEN ? len : RADIUS_STRING_LEN;
          memcpy(vp->sval, val, vp->lval);
          break;
-     case RADIUS_TYPE_DATE:
      case RADIUS_TYPE_INTEGER:
+         // Try values for that attribute
+         if (isalpha(val[0])) {
+             for (value = dict->values;  value; value = value->next) {
+                 if (!strcasecmp(value->name, val)) {
+                     vp->lval = value->value;
+                     return vp;
+                 }
+             }
+         }
+     case RADIUS_TYPE_DATE:
      case RADIUS_TYPE_IPADDR:
          if (len > 0) {
-           vp->lval = ntohl(*(unsigned long *)val);
+             vp->lval = ntohl(*(unsigned long *)val);
          } else
          if (len < 0) {
-           vp->lval = atol((const char*)val);
+             vp->lval = atol((const char*)val);
          } else {
-           memcpy(&vp->lval, val, sizeof(vp->lval));
+             memcpy(&vp->lval, val, sizeof(vp->lval));
          }
          break;
      default:
@@ -2747,7 +2767,7 @@ static void RadiusAttrPrintf(RadiusAttr *vp, Ns_DString *ds, int printname, int 
          case RADIUS_TYPE_DATE:
             char buf[64];
             strftime(buf, sizeof(buf), "%Y-%m-%d %T", ns_localtime((const time_t*)&attr->lval));
-            Ns_DStringPrintf(ds, "%s%s%s", printall?"{":"", buf, printall?"}":"");
+            Ns_DStringPrintf(ds, "%s%s%s", printname?"{":"", buf, printname?"}":"");
             break;
          case RADIUS_TYPE_INTEGER:
             Ns_DStringPrintf(ds, "%d", attr->lval);
@@ -2757,7 +2777,7 @@ static void RadiusAttrPrintf(RadiusAttr *vp, Ns_DString *ds, int printname, int 
             break;
          case RADIUS_TYPE_STRING:
          case RADIUS_TYPE_FILTER_BINARY:
-            for (i = 0;i < attr->lval;i++) {
+            for (i = 0; i < attr->lval; i++) {
                  if (!isprint((int)attr->sval[i])) {
                      break;
                  }
@@ -2767,7 +2787,7 @@ static void RadiusAttrPrintf(RadiusAttr *vp, Ns_DString *ds, int printname, int 
                 break;
             }
          default:
-            for (i = 0;i < attr->lval;i++) {
+            for (i = 0; i < attr->lval; i++) {
                 Ns_DStringPrintf(ds, "%2.2X", attr->sval[i]);
             }
         }
@@ -2861,8 +2881,7 @@ static unsigned char *RadiusAttrPack(RadiusAttr *vp, unsigned char *ptr, short *
     if (!ptr || !vp) {
         return ptr;
     }
-
-    if (vp->vendor) {
+    if (vp->vendor> 0) {
         vlen = 6;
         if (*length + vlen >= RADIUS_BUFFER_LEN) {
             return p0;
@@ -2903,7 +2922,7 @@ static unsigned char *RadiusAttrPack(RadiusAttr *vp, unsigned char *ptr, short *
      default:
          return p0;
     }
-    if (vp->vendor) {
+    if (vp->vendor > 0) {
         *p0 += len+2;
     }
     return ptr;
@@ -2929,7 +2948,7 @@ static void RadiusHeaderPack(RadiusHeader *hdr, int id, int code, RadiusVector v
     ptr = ((unsigned char*)hdr) + hdr->length;
     memcpy(hdr->vector, vector, RADIUS_VECTOR_LEN);
     // Pack attributes into the packet
-    for (;vp;vp = vp->next) {
+    for (;vp; vp = vp->next) {
         switch(vp->attribute) {
          case RADIUS_USER_PASSWORD:
             RadiusPasswdEncrypt(vp, hdr->vector, secret, 0, 0);
@@ -3173,12 +3192,12 @@ static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CON
             Tcl_WrongNumArgs(interp, 2, objv, "host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...");
             return TCL_ERROR;
         }
-        if (Ns_GetSockAddr((sockaddr_in*)&sa, (char*)Tcl_GetString(objv[2]), port) != NS_OK) {
-            Tcl_AppendResult(interp, "noHost: unknown host: ", Tcl_GetString(objv[2]), 0);
-            return TCL_ERROR;
-        }
         if (!(port = atoi(Tcl_GetString(objv[3])))) {
             port = RADIUS_AUTH_PORT;
+        }
+        if (Ns_GetSockAddr((sockaddr_in*)&sa, Tcl_GetString(objv[2]), port) != NS_OK) {
+            Tcl_AppendResult(interp, "noHost: unknown host: ", Tcl_GetString(objv[2]), 0);
+            return TCL_ERROR;
         }
         for (int i = 5;i < objc - 1;i += 2) {
             if (!strcasecmp(Tcl_GetString(objv[i]), "Code")) {
@@ -3210,7 +3229,6 @@ static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CON
         RadiusAttrFree(&vp);
         memcpy(vector, hdr->vector, RADIUS_VECTOR_LEN);
         id = hdr->id;
-
 again:
         if (sendto(fd, (char *)hdr, ntohs(hdr->length), 0, (struct sockaddr *)&sa, sizeof(struct sockaddr_in)) <= 0) {
             Tcl_AppendResult(interp, "noResponse: ", strerror(errno), 0);
@@ -3245,13 +3263,13 @@ again:
             return TCL_ERROR;
         }
         // Verify reply md5 digest
-        if (RadiusVectorVerify(hdr, vector, (char*)Tcl_GetString(objv[3]))) {
+        if (RadiusVectorVerify(hdr, vector, Tcl_GetString(objv[4]))) {
             Tcl_AppendResult(interp, "noResponse: invalid reply digest", 0);
             return TCL_ERROR;
         }
         Ns_DStringInit(&ds);
         Ns_DStringPrintf(&ds, "code %d id %d ipaddr %s ", hdr->code, hdr->id, ns_inet_ntoa(sa.sin_addr));
-        if ((vp = RadiusAttrParse(server, hdr, len, (char*)Tcl_GetString(objv[4])))) {
+        if ((vp = RadiusAttrParse(server, hdr, len, Tcl_GetString(objv[4])))) {
             RadiusAttrPrintf(vp, &ds, 1, 1);
             RadiusAttrFree(&vp);
         }
@@ -3288,8 +3306,18 @@ again:
         } else {
             n = atoi(Tcl_GetString(objv[5]));
         }
-        if (!RadiusDictFind(server, 0, atoi(Tcl_GetString(objv[3])), atoi(Tcl_GetString(objv[4])), 0)) {
+        dict = RadiusDictFind(server, 0, atoi(Tcl_GetString(objv[3])), atoi(Tcl_GetString(objv[4])), 0);
+        if (!dict) {
             dict = RadiusDictAdd(server, Tcl_GetString(objv[2]), atoi(Tcl_GetString(objv[3])), atoi(Tcl_GetString(objv[4])), n);
+        }
+        if (dict) {
+            for (int i = 6; i < objc - 1; i+= 2) {
+                value = (RadiusValue*)ns_calloc(1, sizeof(RadiusValue));
+                strncpy(value->name, Tcl_GetString(objv[i]), RADIUS_STRING_LEN);
+                value->value = atoi(Tcl_GetString(objv[i+1]));
+                value->next = dict->values;
+                dict->values = value;
+            }
         }
         break;
 
@@ -3312,7 +3340,7 @@ again:
 
      case cmdDictLabel:
         if (objc < 5) {
-            Tcl_WrongNumArgs(interp, 2, objv, "namr vendor value");
+            Tcl_WrongNumArgs(interp, 2, objv, "namr vendor num");
             return TCL_ERROR;
         }
         dict = RadiusDictFind(server, Tcl_GetString(objv[2]), -1, atoi(Tcl_GetString(objv[3])), 0);
@@ -3347,6 +3375,11 @@ again:
             return TCL_ERROR;
         }
         dict = RadiusDictFind(server, Tcl_GetString(objv[2]), -1, objc > 3 ? atoi(Tcl_GetString(objv[3])) : 0, 1);
+        while (dict->values) {
+            value = dict->values->next;
+            ns_free(dict->values);
+            dict->values = value;
+        }
         ns_free(dict);
         break;
 
@@ -3437,6 +3470,10 @@ again:
         break;
 
      case cmdReqGet:
+        req = (RadiusRequest*)Ns_TlsGet(&radiusTls);
+        if (!req) {
+            break;
+        }
         if (objc < 3) {
             Tcl_WrongNumArgs(interp, 2, objv, "name ?vendor?");
             return TCL_ERROR;
@@ -3446,7 +3483,6 @@ again:
             vendor = atoi(Tcl_GetString(objv[3]));
         }
         Ns_DStringInit(&ds);
-        req = (RadiusRequest*)Ns_TlsGet(&radiusTls);
         if (!strcmp(Tcl_GetString(objv[2]), "code")) {
             Ns_DStringPrintf(&ds, "%d", req->req_code);
         } else
@@ -3465,8 +3501,11 @@ again:
 
      case cmdReqSet:
         req = (RadiusRequest*)Ns_TlsGet(&radiusTls);
-        for (int i = 2;i < objc - 1;i += 2) {
-            if (!strcmp(Tcl_GetString(objv[i]), "code")) {
+        if (!req) {
+            break;
+        }
+        for (int i = 2; i < objc - 1; i += 2) {
+            if (!strcasecmp(Tcl_GetString(objv[i]), "code")) {
                 req->reply_code = atoi(Tcl_GetString(objv[i+1]));
             } else
             if ((attr = RadiusAttrCreate(server, Tcl_GetString(objv[i]), -1, -1, Tcl_GetString(objv[i+1]), -1))) {
@@ -3477,6 +3516,9 @@ again:
 
      case cmdReqList:
         req = (RadiusRequest*)Ns_TlsGet(&radiusTls);
+        if (!req) {
+            break;
+        }
         Ns_DStringInit(&ds);
         Ns_DStringPrintf(&ds, "code %d id %d ipaddr %s ", req->req_code, req->req_id, ns_inet_ntoa(req->addr.sin_addr));
         RadiusAttrPrintf(req->req, &ds, 1, 1);

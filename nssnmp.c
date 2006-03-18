@@ -1280,7 +1280,7 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST 
      case cmdDestroy:
          break;
     }
-    if (Tcl_GetIntFromObj(interp,objv[2],&id) != TCL_OK) {
+    if (Tcl_GetIntFromObj(interp, objv[2], &id) != TCL_OK) {
         return TCL_ERROR;
     }
     /* All other commands require existig sesion */
@@ -1297,77 +1297,77 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST 
         break;
      case cmdConfig:
         if (objc < 4) {
-            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp config #s name",0);
+            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp config #s name", 0);
             return TCL_ERROR;
         }
-        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-address")) {
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0), "-address")) {
             IpAddress ipaddr = *session->addr;
-            Tcl_AppendResult(interp,ipaddr.get_printable(),0);
+            Tcl_AppendResult(interp, ipaddr.get_printable(),0);
         } else
-        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-port")) {
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0), "-port")) {
             char tmp[32];
             sprintf(tmp,"%d",session->addr->get_port());
-            Tcl_AppendResult(interp,tmp,0);
+            Tcl_AppendResult(interp, tmp, 0);
         } else
-        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-community")) {
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0), "-community")) {
             OctetStr community;
             session->target.get_readcommunity(community);
-            Tcl_AppendResult(interp,community.get_printable(),0);
+            Tcl_AppendResult(interp, community.get_printable(), 0);
         } else
-        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-writecommunity")) {
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0), "-writecommunity")) {
             OctetStr community;
             session->target.get_writecommunity(community);
-            Tcl_AppendResult(interp,community.get_printable(),0);
+            Tcl_AppendResult(interp, community.get_printable(), 0);
         } else
-        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-timeout")) {
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0), "-timeout")) {
             char tmp[32];
             sprintf(tmp,"%ld",session->target.get_timeout());
-            Tcl_AppendResult(interp,tmp,0);
+            Tcl_AppendResult(interp, tmp, 0);
         } else
-        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-version")) {
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0), "-version")) {
             char tmp[32];
             sprintf(tmp,"%d",session->target.get_version()+1);
-            Tcl_AppendResult(interp,tmp,0);
+            Tcl_AppendResult(interp, tmp, 0);
         } else
-        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-retries")) {
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0), "-retries")) {
             char tmp[32];
             sprintf(tmp,"%d",session->target.get_retry());
-            Tcl_AppendResult(interp,tmp,0);
+            Tcl_AppendResult(interp, tmp, 0);
         }
         break;
 
      case cmdGet: {
         if (objc < 4) {
-            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp get #s vb ...",0);
+            Tcl_AppendResult(interp, "wrong # args: should be ns_snmp get #s vb ...", 0);
             return TCL_ERROR;
         }
         SnmpVb vb;
         Oid oid;
-        session->pdu.set_vblist(&vb,0);
+        session->pdu.set_vblist(&vb, 0);
         for (int i = 3;i < objc;i++) {
-             oid = Tcl_GetStringFromObj(objv[i],0);
+             oid = Tcl_GetStringFromObj(objv[i], 0);
              if (!oid.valid()) {
-                 Tcl_AppendResult(interp,"invalid OID ",Tcl_GetStringFromObj(objv[i],0),0);
+                 Tcl_AppendResult(interp, "invalid OID ", Tcl_GetStringFromObj(objv[i],0), 0);
                  return TCL_ERROR;
              }
              vb.set_oid(oid);
              session->pdu += vb;
         }
-        if ((status = session->snmp->get(session->pdu,session->target)) != SNMP_CLASS_SUCCESS) {
-            Tcl_AppendResult(interp,SnmpError(session,status),0);
+        if ((status = session->snmp->get(session->pdu, session->target)) != SNMP_CLASS_SUCCESS) {
+            Tcl_AppendResult(interp, SnmpError(session,status),0);
             return TCL_ERROR;
         }
-        Tcl_Obj *obj,*list = Tcl_NewListObj(0,0);
+        Tcl_Obj *obj,*list = Tcl_NewListObj(0, 0);
         for (int i = 0; i < session->pdu.get_vb_count(); i++) {
             session->pdu.get_vb(vb,i);
             if (!SyntaxValid(vb.get_syntax())) {
                 continue;
             }
             obj = Tcl_NewListObj(0,0);
-            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_oid(),-1));
-            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(SyntaxStr(vb.get_syntax()),-1));
-            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_value(),-1));
-            Tcl_ListObjAppendElement(interp,list,obj);
+            Tcl_ListObjAppendElement(interp, obj,Tcl_NewStringObj((char*)vb.get_printable_oid(), -1));
+            Tcl_ListObjAppendElement(interp, obj,Tcl_NewStringObj(SyntaxStr(vb.get_syntax()), -1));
+            Tcl_ListObjAppendElement(interp, obj,Tcl_NewStringObj((char*)vb.get_printable_value(), -1));
+            Tcl_ListObjAppendElement(interp, list, obj);
         }
         Tcl_SetObjResult(interp,list);
         break;
@@ -1379,16 +1379,16 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST 
         }
         SnmpVb vb;
         Tcl_Obj *obj;
-        Oid oid(Tcl_GetStringFromObj(objv[3],0));
+        Oid oid(Tcl_GetStringFromObj(objv[3], 0));
         if (!oid.valid()) {
-            Tcl_AppendResult(interp,"invalid OID ",Tcl_GetStringFromObj(objv[3],0),0);
+            Tcl_AppendResult(interp, "invalid OID ", Tcl_GetStringFromObj(objv[3],0),0);
             return TCL_ERROR;
         }
         char *oidStr = (char*)oid.get_printable();
         vb.set_oid(oid);
         session->pdu.set_vblist(&vb,1);
         while((status = session->snmp->get_bulk(session->pdu,session->target, 0, session->bulk)) == SNMP_CLASS_SUCCESS) {
-          for (int i = 0;i < session->pdu.get_vb_count();i++) {
+          for (int i = 0; i < session->pdu.get_vb_count(); i++) {
               session->pdu.get_vb(vb,i);
               if (!SyntaxValid(vb.get_syntax()) || strncmp(vb.get_printable_oid(), oidStr, strlen(oidStr))) {
                   goto done;
@@ -1423,21 +1423,21 @@ done:
      }
      case cmdSet: {
         if (objc < 6) {
-            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp set #s OID type value",0);
+            Tcl_AppendResult(interp, "wrong # args: should be ns_snmp set #s OID type value", 0);
             return TCL_ERROR;
         }
         SnmpVb vb;
-        Oid oid(Tcl_GetStringFromObj(objv[3],0));
-        char *type = Tcl_GetStringFromObj(objv[4],0);
-        char *value = Tcl_GetStringFromObj(objv[5],0);
+        Oid oid(Tcl_GetStringFromObj(objv[3], 0));
+        char *type = Tcl_GetStringFromObj(objv[4], 0);
+        char *value = Tcl_GetStringFromObj(objv[5], 0);
         vb.set_oid(oid);
-        if (vb.SetValue(type,value) != TCL_OK) {
-            Tcl_AppendResult(interp,"invalid variable type, should one of i,u,t,a,o,s",0);
+        if (vb.SetValue(type, value) != TCL_OK) {
+            Tcl_AppendResult(interp, "invalid variable type, should one of i,u,t,a,o,s", 0);
             return TCL_ERROR;
         }
         session->pdu.set_vblist(&vb,1);
-        if ((status = session->snmp->set(session->pdu,session->target)) != SNMP_CLASS_SUCCESS) {
-            Tcl_AppendResult(interp,SnmpError(session,status),0);
+        if ((status = session->snmp->set(session->pdu, session->target)) != SNMP_CLASS_SUCCESS) {
+            Tcl_AppendResult(interp, SnmpError(session, status), 0);
             return TCL_ERROR;
         }
         break;
@@ -1450,14 +1450,14 @@ done:
         }
         Oid tid(Tcl_GetString(objv[3]));
         Oid eid(Tcl_GetString(objv[4]));
-        for (int i = 5;i < objc - 2;i += 3) { 
+        for (int i = 5; i < objc - 2; i += 3) {
             SnmpVb vb;
             Oid oid(Tcl_GetString(objv[i]));
             char *type = Tcl_GetString(objv[i+1]);
             char *value = Tcl_GetString(objv[i+2]);
             vb.set_oid(oid);
             if (vb.SetValue(type,value) != TCL_OK) {
-                Tcl_AppendResult(interp,"invalid variable type, should one of i,u,t,a,o,s",0);
+                Tcl_AppendResult(interp, "invalid variable type, should one of i,u,t,a,o,s", 0);
                 return TCL_ERROR;
             }
             session->pdu += vb;
@@ -1465,18 +1465,18 @@ done:
         session->pdu.set_notify_id(tid);
         session->pdu.set_notify_enterprise(eid);
         if (cmd == cmdTrap) {
-            status = session->snmp->trap(session->pdu,session->target);
+            status = session->snmp->trap(session->pdu, session->target);
         } else {
-            status = session->snmp->inform(session->pdu,session->target);
+            status = session->snmp->inform(session->pdu, session->target);
         }
         if (status != SNMP_CLASS_SUCCESS) {
-            Tcl_AppendResult(interp,SnmpError(session,status),0);
+            Tcl_AppendResult(interp, SnmpError(session, status), 0);
             return TCL_ERROR;
         }
         break;
      }
      case cmdDestroy:
-        SessionUnlink(server,session,1);
+        SessionUnlink(server, session, 1);
         break;
     }
     return TCL_OK;
@@ -1496,7 +1496,7 @@ char *SnmpString::get_printable()
     }
     output_buffer = new char[smival.value.string.len + 1];
     if (smival.value.string.len) {
-        memcpy(output_buffer,smival.value.string.ptr,(unsigned int)smival.value.string.len);
+        memcpy(output_buffer, smival.value.string.ptr, (unsigned int)smival.value.string.len);
     }
     output_buffer[smival.value.string.len] = '\0';
     return(output_buffer);
@@ -1525,7 +1525,7 @@ SnmpString& SnmpString::operator=(unsigned long val)
     delete [] smival.value.string.ptr;
     smival.value.string.len = 32;
     smival.value.string.ptr = new unsigned char[33];
-    sprintf((char*)smival.value.string.ptr,"%lu",val);
+    sprintf((char*)smival.value.string.ptr, "%lu", val);
     return *this;
 }
 
@@ -2212,6 +2212,9 @@ static void FormatIntTC(Tcl_Interp *interp, char *bytes, char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.14  2006/03/18 04:13:19  seryakov
+ * For Linux systems use native crypt which supports MD5 digests, increase encryption buffer
+ *
  * Revision 1.13  2006/03/18 00:07:24  seryakov
  * big RADIUS rewrite, server and user support
  *
@@ -3123,6 +3126,7 @@ static void RadiusUserList(Server *server, char *user, Ns_DString *ds)
  */
 static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
+    Server *server = (Server*)arg;
     fd_set rfds;
     Ns_DString ds;
     int retries = 3;
@@ -3130,7 +3134,6 @@ static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CON
     struct timeval tm;
     int fd, id, len, port, n, vendor;
     struct sockaddr_in sa;
-    Server *server = (Server*)arg;
     socklen_t salen = sizeof(sa);
     int code = RADIUS_ACCESS_REQUEST;
     unsigned char buffer[RADIUS_BUFFER_LEN];
@@ -3152,7 +3155,7 @@ static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CON
         "send", "reqget", "reqset", "reqlist",
         "dictlist", "dictget", "dictdel", "dictadd", "dictvalue", "dictlabel",
         "clientadd", "clientlist", "clientdel", "clientget",
-        "useradd", "userfind", "userdel", "userlist"
+        "useradd", "userfind", "userdel", "userlist", 0
     };
     int cmd;
 
@@ -3160,7 +3163,7 @@ static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CON
         Tcl_WrongNumArgs(interp, 1, objv, "args");
         return TCL_ERROR;
     }
-    if (Tcl_GetIndexFromObj(interp, objv[1], sCmd, "command", TCL_EXACT, (int *)&cmd) != TCL_OK) {
+    if (Tcl_GetIndexFromObj(interp, objv[1], sCmd, "command", TCL_EXACT, &cmd) != TCL_OK) {
         return TCL_ERROR;
     }
 

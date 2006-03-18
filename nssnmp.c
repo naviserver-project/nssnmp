@@ -471,7 +471,6 @@ static Ns_ThreadProc TrapThread;
 
 extern int receive_snmp_notification(int sock, Snmp &snmp_session,Pdu &pdu, SnmpTarget **target);
 static int UdpListen(char *address,int port);
-static int UdpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
 static int SnmpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
 static int TrapCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
 static int MibCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
@@ -676,7 +675,6 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
 static int SnmpInterpInit(Tcl_Interp *interp, void *arg)
 {
     Tcl_CreateObjCommand(interp, "ns_snmp", SnmpCmd, arg, NULL);
-    Tcl_CreateObjCommand(interp, "ns_udp", UdpCmd,arg, NULL);
     Tcl_CreateObjCommand(interp, "ns_mib", MibCmd, arg, NULL);
     Tcl_CreateObjCommand(interp, "ns_ping", PingCmd, arg, NULL);
     Tcl_CreateObjCommand(interp, "ns_icmp", IcmpCmd, arg, NULL);
@@ -2212,6 +2210,9 @@ static void FormatIntTC(Tcl_Interp *interp, char *bytes, char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.16  2006/03/18 18:05:41  seryakov
+ * modules cleanups and updates
+ *
  * Revision 1.15  2006/03/18 05:50:50  seryakov
  * RADIUS server completion, full dictinary support
  *
@@ -3699,101 +3700,3 @@ static void RadiusInit(Server *server)
    RadiusDictAdd(server, "User-Id", 99, 0, RADIUS_TYPE_STRING);
 }
 
-/*
- *----------------------------------------------------------------------
- *
- * UdpCmd --
- *
- *	Send UDP request and wait for response
- *
- * Results:
- *      reply data
- *
- * Side effects:
- *  	None
- *
- *----------------------------------------------------------------------
- */
-static int
-UdpCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
-{
-    fd_set fds;
-    char buf[16384];
-    struct timeval tv;
-    struct sockaddr_in sa;
-    int salen = sizeof(sa);
-    char *address = 0,  *data = 0;
-    int i,  sock,  len,  port,  timeout = 5,  retries = 1,  noreply = 0;
-        
-    Ns_ObjvSpec opts[] = {
-        {"-timeout",  Ns_ObjvInt,    &timeout,  NULL}, 
-        {"-retries",  Ns_ObjvInt,    &retries,  NULL}, 
-        {"-noreply",  Ns_ObjvInt,    &noreply,  NULL}, 
-        {"--",       Ns_ObjvBreak,   NULL,     NULL}, 
-        {NULL,  NULL,  NULL,  NULL}
-    };
-    Ns_ObjvSpec args[] = {
-        {"address",   Ns_ObjvString,  &address,  NULL}, 
-        {"port",   Ns_ObjvInt,  &port,  NULL}, 
-        {"data",   Ns_ObjvString,  &data,  &len}, 
-        {NULL,  NULL,  NULL,  NULL}
-    };
-
-    if (Ns_ParseObjv(opts,  args,  interp,  1,  objc,  objv) != NS_OK) {
-        return TCL_ERROR;
-    }
-    if (Ns_GetSockAddr(&sa,  address,  port) != NS_OK) {
-        sprintf(buf,  "%s:%d",  address,  port);
-        Tcl_AppendResult(interp,  "invalid address ",  address,  0);
-        return TCL_ERROR;
-    }
-    sock = socket(AF_INET,  SOCK_DGRAM,  0);
-    if (sock < 0) {
-        Tcl_AppendResult(interp,  "socket error ",  strerror(errno),  0);
-        return TCL_ERROR;
-    }
-    /* To support brodcasting addresses */
-    i = 1;
-    setsockopt(sock,  SOL_SOCKET,  SO_BROADCAST,  &i,  sizeof(int));
-
-resend:
-    if (sendto(sock,  data,  len,  0, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
-        Tcl_AppendResult(interp,  "sendto error ",  strerror(errno),  0);
-        return TCL_ERROR;
-    }
-    if (noreply) {
-        close(sock);
-        return TCL_OK;
-    }
-    memset(buf, 0, sizeof(buf));
-    Ns_SockSetNonBlocking(sock);
-again:
-    FD_ZERO(&fds);
-    FD_SET(sock, &fds);
-    tv.tv_sec = timeout;
-    tv.tv_usec = 0;
-    len = select(sock+1,  &fds,  0,  0,  &tv);
-    switch (len) {
-     case -1:
-         if (errno == EINTR || errno == EINPROGRESS || errno == EAGAIN) {
-             goto again;
-         }
-         Tcl_AppendResult(interp,  "select error ",  strerror(errno),  0);
-         close(sock);
-         return TCL_ERROR;
-
-     case 0:
-         if (--retries > 0) goto resend;
-         Tcl_AppendResult(interp,  "timeout",  0);
-         close(sock);
-         return TCL_ERROR;
-    }
-    if (FD_ISSET(sock,  &fds)) {
-        len = recvfrom(sock,  buf,  sizeof(buf)-1,  0,  (struct sockaddr*)&sa,  (socklen_t*)&salen);
-        if (len > 0) {
-            Tcl_AppendResult(interp,  buf,  0);
-        }
-    }
-    close(sock);
-    return TCL_OK;
-}

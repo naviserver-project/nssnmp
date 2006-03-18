@@ -22,9 +22,6 @@ OBJS     = nssnmp.o
 #
 PROCS	= nsmib_procs.tcl nsradius_procs.tcl
 
-#
-# Objects to clean
-#
 INSTALL += install-procs
 
 CFLAGS	 += -I$(SNMPINC)

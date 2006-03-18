@@ -157,19 +157,13 @@ requests.
       returns the following Tcl list:
        { requests_sent requests_received loss_percentage rtt_min rtt_avg rtt_max }
 
-    ns_radius host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...
+    ns_radius send host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...
       performs RADIUS requests
 
       Example:
-        ns_radius localhost 1645 secret User-Name test User-Password test2
+        ns_radius send localhost 1645 secret User-Name test User-Password test2
 
    
-    ns_udp ?-timeout N? ?-noreply? ipaddr port data
-      sends udp data
-
-      Example:
-         ns_udp 127.0.0.1 80 "GET / HTTP/1.0\n\n"
-
 Nsmibdump
 
   nsmibdump is utility that dumps MIB module or file into nsmib format. It uses 

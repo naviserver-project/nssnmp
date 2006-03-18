@@ -1,3 +1,8 @@
+2006-03-17 Vlad Seryakov vlad@crystalballinc.com
+
+	* Removed ns_udp, it is handled by ns_udp module now
+	* Updated RADIUS support, added users, dictionary values
+
 2006-01-05 Vlad Seryakov vlad@crystalballinc.com
 
 	* added debug option to snmp traps

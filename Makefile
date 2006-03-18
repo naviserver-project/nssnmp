@@ -20,12 +20,11 @@ OBJS     = nssnmp.o
 #
 # Library Tcl files
 #
-PROCS	= nsmib_procs.tcl
+PROCS	= nsmib_procs.tcl nsradius_procs.tcl
 
 #
 # Objects to clean
 #
-CLEAN   += clean-bak
 INSTALL += install-procs
 
 CFLAGS	 += -I$(SNMPINC)
@@ -36,11 +35,8 @@ include  $(NAVISERVER)/include/Makefile.module
 CC	= g++
 LDSO	= g++ -shared -nostartfiles
 
-clean-bak:
-	rm -rf *~ nsmibdump
-
 install-procs: $(PROCS)
-	$(INSTALL_SH) $(PROCS) $(INSTTCL)/
+	for f in $(PROCS); do $(INSTALL_SH) $$f $(INSTTCL)/; done
 
 nsmibdump:	nsmibdump.c
 	gcc -o nsmibdump nsmibdump.c -lsmi

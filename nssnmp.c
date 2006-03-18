@@ -136,11 +136,11 @@
  *      { requests_sent requests_received loss_percentage rtt_min rtt_avg rtt_max }
  *
  *  RADIUS requests
- *    ns_radius host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...
+ *    ns_radius send host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...
  *     performs RADIUS requests
  *
  *     Example:
- *       ns_radius localhost 1645 secret User-Name test User-Password test2
+ *       ns_radius send localhost 1645 secret User-Name test User-Password test2
  *
  * Authors
  *
@@ -360,19 +360,37 @@ typedef struct _radiusAttr_t {
    unsigned int lval;
 } RadiusAttr;
 
+// Dictionary value
+typedef struct _radiusValue_t {
+   struct _radiusValue_t *next;
+   char name[RADIUS_STRING_LEN+1];
+   int value;
+} RadiusValue;
+
+// Dictionary attribute
 typedef struct _radiusDict_t {
-   struct _radiusDict_t *next,*prev;
+   struct _radiusDict_t *next;
+   struct _radiusDict_t *prev;
    char name[RADIUS_STRING_LEN+1];
    int attribute;
    short vendor;
    short type;
+   RadiusValue *values;
 } RadiusDict;
 
+// Client secret
 typedef struct _radiusClient {
-   struct _radiusClient *next,*prev;
+   struct _radiusClient *next;
+   struct _radiusClient *prev;
    struct in_addr addr;
    char secret[RADIUS_VECTOR_LEN+1];
 } RadiusClient;
+
+// User record
+typedef struct _radiusUser {
+   RadiusAttr *check;
+   RadiusAttr *reply;
+} RadiusUser;
 
 typedef struct _server {
    char *name;
@@ -408,9 +426,13 @@ typedef struct _server {
      int auth_port;
      int acct_port;
      char *address;
+     Ns_Mutex userMutex;
      Ns_Mutex clientMutex;
      Ns_Mutex requestMutex;
+     Tcl_HashTable userList;
      RadiusClient *clientList;
+     Ns_Mutex dictMutex;
+     RadiusDict *dictList;
    } radius;
 } Server;
 
@@ -441,9 +463,6 @@ typedef struct _radiusRequest {
    struct sockaddr_in addr;
 } RadiusRequest;
 
-static Ns_Mutex radiusDictMutex;
-static RadiusDict *radiusDictList = 0;
-
 static Ns_SockProc RadiusProc;
 static Ns_ThreadProc RadiusThread;
 
@@ -452,15 +471,13 @@ static Ns_ThreadProc TrapThread;
 
 extern int receive_snmp_notification(int sock, Snmp &snmp_session,Pdu &pdu, SnmpTarget **target);
 static int UdpListen(char *address,int port);
-static int UdpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[]);
-static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[]);
-static int TrapCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
-static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
-static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
-static int IcmpCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
-static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
-static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
-static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv);
+static int UdpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
+static int SnmpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
+static int TrapCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
+static int MibCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
+static int PingCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
+static int IcmpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
+static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
 static void TrapDump(Server *server,Pdu &pdu,SnmpTarget &target);
 static const char *SnmpError(SnmpSession *session,int status);
 static int SnmpInterpInit(Tcl_Interp *interp, void *context);
@@ -473,13 +490,16 @@ static void SessionGC(void *ctx);
 static char *PduTypeStr(int type);
 static char *SyntaxStr(int type);
 static int SyntaxValid(int type);
-static void RadiusInit();
+static void RadiusInit(Server *server);
 
 extern "C" {
 
 extern int Ns_SockListenEx2(char *,char *,int,int);
 extern int Ns_SockListenUdp(char *,int);
 int Ns_SockListenRaw(int proto);
+
+static Ns_Tls trapTls;
+static Ns_Tls radiusTls;
 
 NS_EXPORT int Ns_ModuleVersion = 1;
 
@@ -506,95 +526,133 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     SOCKET sock;
     int status;
     Server *serverPtr;
+    static int initialized = 0;
 
-    Ns_Log(Notice, "nssnmp module version %s server: %s", SNMP_VERSION,server);
+    if (!initialized) {
+        initialized = 1;
+        Ns_TlsAlloc(&trapTls, 0);
+        Ns_TlsAlloc(&radiusTls, 0);
+    }
 
-    path = Ns_ConfigGetPath(server,module,NULL);
+    Ns_Log(Notice, "nssnmp module version %s server: %s", SNMP_VERSION, server);
+
+    path = Ns_ConfigGetPath(server, module, NULL);
     serverPtr = (Server*)ns_calloc(1,sizeof(Server));
     serverPtr->name = server;
-    Tcl_InitHashTable(&serverPtr->mib,TCL_STRING_KEYS);
-    if(!Ns_ConfigGetInt(path,"debug",&serverPtr->debug)) serverPtr->debug = 0;
-    if(!Ns_ConfigGetInt(path,"idle_timeout",&serverPtr->idle_timeout)) serverPtr->idle_timeout = 600;
-    if(!Ns_ConfigGetInt(path,"gc_interval",&serverPtr->gc_interval)) serverPtr->gc_interval = 600;
-    if(!(serverPtr->community = Ns_ConfigGetValue(path,"community"))) serverPtr->community = "public";
-    if(!(serverPtr->writecommunity = Ns_ConfigGetValue(path,"writecommunity"))) serverPtr->writecommunity = "private";
-    if(!Ns_ConfigGetInt(path,"port",&serverPtr->port)) serverPtr->port = 161;
-    if(!Ns_ConfigGetInt(path,"timeout",&serverPtr->timeout)) serverPtr->timeout = 2;
-    if(!Ns_ConfigGetInt(path,"retries",&serverPtr->retries)) serverPtr->retries = 2;
-    if(!Ns_ConfigGetInt(path,"version",&serverPtr->version)) serverPtr->version = 2;
-    if(!Ns_ConfigGetInt(path,"bulk",&serverPtr->bulk)) serverPtr->bulk = 10;
-    if(!Ns_ConfigGetInt(path,"trap_port",&serverPtr->trap.port)) serverPtr->trap.port = 162;
-    if(!(serverPtr->trap.address = Ns_ConfigGetValue(path,"trap_address"))) serverPtr->trap.address = "0.0.0.0";
+    Tcl_InitHashTable(&serverPtr->mib, TCL_STRING_KEYS);
+    Tcl_InitHashTable(&serverPtr->radius. userList, TCL_STRING_KEYS);
+    if (!Ns_ConfigGetInt(path,"debug", &serverPtr->debug)) {
+        serverPtr->debug = 0;
+    }
+    if (!Ns_ConfigGetInt(path, "idle_timeout", &serverPtr->idle_timeout)) {
+        serverPtr->idle_timeout = 600;
+    }
+    if (!Ns_ConfigGetInt(path, "gc_interval", &serverPtr->gc_interval)) {
+        serverPtr->gc_interval = 600;
+    }
+    if (!(serverPtr->community = Ns_ConfigGetValue(path, "community"))) {
+        serverPtr->community = "public";
+    }
+    if (!(serverPtr->writecommunity = Ns_ConfigGetValue(path, "writecommunity"))) {
+        serverPtr->writecommunity = "private";
+    }
+    if (!Ns_ConfigGetInt(path, "port", &serverPtr->port)) {
+        serverPtr->port = 161;
+    }
+    if (!Ns_ConfigGetInt(path, "timeout", &serverPtr->timeout)) {
+        serverPtr->timeout = 2;
+    }
+    if (!Ns_ConfigGetInt(path, "retries", &serverPtr->retries)) {
+        serverPtr->retries = 2;
+    }
+    if (!Ns_ConfigGetInt(path, "version", &serverPtr->version)) {
+        serverPtr->version = 2;
+    }
+    if (!Ns_ConfigGetInt(path, "bulk", &serverPtr->bulk)) {
+        serverPtr->bulk = 10;
+    }
+    if (!Ns_ConfigGetInt(path, "trap_port", &serverPtr->trap.port)) {
+        serverPtr->trap.port = 162;
+    }
+    if (!(serverPtr->trap.address = Ns_ConfigGetValue(path, "trap_address"))) {
+        serverPtr->trap.address = "0.0.0.0";
+    }
     serverPtr->trap.proc = Ns_ConfigGetValue(path,"trap_proc");
-    if(!Ns_ConfigGetInt(path,"radius_auth_port",&serverPtr->radius.auth_port)) serverPtr->radius.auth_port = RADIUS_AUTH_PORT;
-    if(!Ns_ConfigGetInt(path,"radius_acct_port",&serverPtr->radius.acct_port)) serverPtr->radius.acct_port = RADIUS_ACCT_PORT;
-    if(!(serverPtr->radius.address = Ns_ConfigGetValue(path,"radius_address"))) serverPtr->radius.address = "0.0.0.0";
-    serverPtr->radius.proc = Ns_ConfigGetValue(path,"radius_proc");
+    if (!Ns_ConfigGetInt(path, "radius_auth_port", &serverPtr->radius.auth_port)) {
+        serverPtr->radius.auth_port = RADIUS_AUTH_PORT;
+    }
+    if (!Ns_ConfigGetInt(path, "radius_acct_port", &serverPtr->radius.acct_port)) {
+        serverPtr->radius.acct_port = RADIUS_ACCT_PORT;
+    }
+    if (!(serverPtr->radius.address = Ns_ConfigGetValue(path, "radius_address"))) {
+        serverPtr->radius.address = "0.0.0.0";
+    }
+    serverPtr->radius.proc = Ns_ConfigGetValue(path, "radius_proc");
 
     // Initialize ICMP system
-    if(Ns_ConfigGetInt(path, "icmp_ports", &serverPtr->icmp.count) > 0) {
-      IcmpPort *icmp;
-      for(int i = 0; i < serverPtr->icmp.count; i++) {
-        if((sock = Ns_SockListenRaw(IPPROTO_ICMP)) == -1) {
-          Ns_Log(Error,"nssnmp: couldn't create icmp socket: %s",strerror(errno));
-          return NS_ERROR;
+    if (Ns_ConfigGetInt(path, "icmp_ports", &serverPtr->icmp.count) > 0) {
+        IcmpPort *icmp;
+        for (int i = 0; i < serverPtr->icmp.count; i++) {
+          if ((sock = Ns_SockListenRaw(IPPROTO_ICMP)) == -1) {
+              Ns_Log(Error,"nssnmp: couldn't create icmp socket: %s", strerror(errno));
+              return NS_ERROR;
+          }
+          icmp = (IcmpPort*)ns_calloc(1,sizeof(IcmpPort));
+          icmp->fd = sock;
+          icmp->next = serverPtr->icmp.ports;
+          if (icmp->next) icmp->next->prev = icmp;
+          serverPtr->icmp.ports = icmp;
         }
-        icmp = (IcmpPort*)ns_calloc(1,sizeof(IcmpPort));
-        icmp->fd = sock;
-        icmp->next = serverPtr->icmp.ports;
-        if(icmp->next) icmp->next->prev = icmp;
-        serverPtr->icmp.ports = icmp;
-      }
-      Ns_Log(Notice,"nssnmp: allocated %d ICMP ports",serverPtr->icmp.count);
+        Ns_Log(Notice,"nssnmp: allocated %d ICMP ports", serverPtr->icmp.count);
     }
 
     /* Configure SNMP trap listener */
-    if(serverPtr->trap.proc) {
-      serverPtr->trap.snmp = new Snmp(status);
-      if(status != SNMP_CLASS_SUCCESS) {
-        Ns_Log(Error,"nssnmp: snmp initialization failed: %s",serverPtr->trap.snmp->error_msg(status));
-        return NS_ERROR;
-      }
-      if((sock = UdpListen(serverPtr->trap.address,serverPtr->trap.port)) != -1) {
-        Ns_SockCallback(sock,TrapProc,serverPtr,NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
-        Ns_Log(Notice,"nssnmp: listening on %s:%d by %s",
-                      serverPtr->trap.address?serverPtr->trap.address:"0.0.0.0",
-                      serverPtr->trap.port,
-                      serverPtr->trap.proc);
-      }
+    if (serverPtr->trap.proc) {
+        serverPtr->trap.snmp = new Snmp(status);
+        if (status != SNMP_CLASS_SUCCESS) {
+            Ns_Log(Error,"nssnmp: snmp initialization failed: %s", serverPtr->trap.snmp->error_msg(status));
+            return NS_ERROR;
+        }
+        if ((sock = UdpListen(serverPtr->trap.address, serverPtr->trap.port)) != -1) {
+          Ns_SockCallback(sock, TrapProc, serverPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
+          Ns_Log(Notice,"nssnmp: listening on %s:%d by %s",
+                        serverPtr->trap.address?serverPtr->trap.address:"0.0.0.0",
+                        serverPtr->trap.port,
+                        serverPtr->trap.proc);
+        }
     }
 
     /* Configure RADIUS server */
-    if(serverPtr->radius.proc) {
-      if((sock = UdpListen(serverPtr->radius.address,serverPtr->radius.auth_port)) != -1) {
-        Ns_SockCallback(sock,RadiusProc,serverPtr,NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
-        Ns_Log(Notice,"nssnmp: radius: listening on %s:%d by %s",
-                      serverPtr->radius.address?serverPtr->radius.address:"0.0.0.0",
-                      serverPtr->radius.auth_port,
-                      serverPtr->radius.proc);
-      }
-      if((sock = UdpListen(serverPtr->radius.address,serverPtr->radius.acct_port)) != -1) {
-        Ns_SockCallback(sock,RadiusProc,serverPtr,NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
-        Ns_Log(Notice,"nssnmp: radius: listening on %s:%d by %s",
-                      serverPtr->radius.address?serverPtr->radius.address:"0.0.0.0",
-                      serverPtr->radius.auth_port,
-                      serverPtr->radius.proc);
-      }
+    if (serverPtr->radius.proc) {
+        if ((sock = UdpListen(serverPtr->radius.address, serverPtr->radius.auth_port)) != -1) {
+            Ns_SockCallback(sock, RadiusProc, serverPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
+            Ns_Log(Notice,"nssnmp: radius: listening on %s:%d by %s",
+                          serverPtr->radius.address?serverPtr->radius.address:"0.0.0.0",
+                          serverPtr->radius.auth_port,
+                          serverPtr->radius.proc);
+        }
+        if ((sock = UdpListen(serverPtr->radius.address, serverPtr->radius.acct_port)) != -1) {
+            Ns_SockCallback(sock, RadiusProc, serverPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
+            Ns_Log(Notice,"nssnmp: radius: listening on %s:%d by %s",
+                          serverPtr->radius.address?serverPtr->radius.address:"0.0.0.0",
+                          serverPtr->radius.acct_port,
+                          serverPtr->radius.proc);
+        }
     }
     /* Schedule garbage collection proc for automatic session close/cleanup */
-    if(serverPtr->gc_interval > 0) {
-      Ns_ScheduleProc(SessionGC,serverPtr,1,serverPtr->gc_interval);
-      Ns_Log(Notice,"ns_snmp: scheduling GC proc for every %d secs",serverPtr->gc_interval);
+    if (serverPtr->gc_interval > 0) {
+         Ns_ScheduleProc(SessionGC, serverPtr, 1, serverPtr->gc_interval);
+         Ns_Log(Notice,"ns_snmp: scheduling GC proc for every %d secs", serverPtr->gc_interval);
     }
-    Ns_MutexSetName2(&serverPtr->snmpMutex,"nssnmp","snmp");
-    Ns_MutexSetName2(&serverPtr->mibMutex,"nssnmp","mib");
-    Ns_MutexSetName2(&serverPtr->icmp.mutex,"nssnmp","icmp");
-    /* Initialize RADIUS system */
-    RadiusInit();
-    Ns_MutexSetName2(&radiusDictMutex,"nssnmp","radiusDict");
-    Ns_MutexSetName2(&serverPtr->radius.clientMutex,"nssnmp","radiusClient");
-    Ns_MutexSetName2(&serverPtr->radius.requestMutex,"nssnmp","radiusRequest");
+    Ns_MutexSetName2(&serverPtr->snmpMutex, "nssnmp", "snmp");
+    Ns_MutexSetName2(&serverPtr->mibMutex, "nssnmp", "mib");
+    Ns_MutexSetName2(&serverPtr->icmp.mutex, "nssnmp", "icmp");
+    Ns_MutexSetName2(&serverPtr->radius.dictMutex, "nssnmp", "radiusDict");
+    Ns_MutexSetName2(&serverPtr->radius.userMutex, "nssnmp", "radiusUser");
+    Ns_MutexSetName2(&serverPtr->radius.clientMutex, "nssnmp", "radiusClient");
+    Ns_MutexSetName2(&serverPtr->radius.requestMutex, "nssnmp", "radiusRequest");
     Ns_TclRegisterTrace(server, SnmpInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
+    RadiusInit(serverPtr);
     return NS_OK;
 }
 
@@ -617,14 +675,13 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
  */
 static int SnmpInterpInit(Tcl_Interp *interp, void *arg)
 {
-    Tcl_CreateObjCommand(interp,"ns_snmp",SnmpCmd,arg,NULL);
-    Tcl_CreateObjCommand(interp,"ns_udp",UdpCmd,arg,NULL);
-    Tcl_CreateCommand(interp, "ns_mib", MibCmd, arg, NULL);
-    Tcl_CreateCommand(interp, "ns_ping", PingCmd, arg, NULL);
-    Tcl_CreateCommand(interp, "ns_icmp", IcmpCmd, arg, NULL);
-    Tcl_CreateCommand(interp, "ns_radius", RadiusCmd, arg, NULL);
-    Tcl_CreateCommand(interp, "ns_radiusdict", RadiusDictCmd, arg, NULL);
-    Tcl_CreateCommand(interp, "ns_radiusclient", RadiusClientCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_snmp", SnmpCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_udp", UdpCmd,arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_mib", MibCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_ping", PingCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_icmp", IcmpCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_radius", RadiusCmd, arg, NULL);
+    Tcl_CreateObjCommand(interp, "ns_trap", TrapCmd, arg, NULL);
     return NS_OK;
 }
 
@@ -646,26 +703,26 @@ static int SnmpInterpInit(Tcl_Interp *interp, void *arg)
 
 static int TrapProc(SOCKET sock,void *arg,int why)
 {
-    if(why != NS_SOCK_READ) {
-      close(sock);
-      return NS_FALSE;
+    if (why != NS_SOCK_READ) {
+        close(sock);
+        return NS_FALSE;
     }
     Server *server = (Server*)arg;
     TrapContext *ctx = new TrapContext(server);
-    if(!receive_snmp_notification(sock,*server->trap.snmp,ctx->pdu,&ctx->target)) {
-      if (server->debug) {
-          TrapDump(server,ctx->pdu,*ctx->target);
-      }
-      /* SNMP inform trap requires response */
-      if (ctx->pdu.get_type() == sNMP_PDU_INFORM) {
-        Pdu pdu = ctx->pdu;
-        server->trap.snmp->response(pdu,*ctx->target);
-      }
-      /* Call trap handler if configured */
-      if(server->trap.proc) {
-        Ns_ThreadCreate(TrapThread,(void *)ctx,0,NULL);
-        return NS_TRUE;
-      }
+    if (!receive_snmp_notification(sock,*server->trap.snmp,ctx->pdu,&ctx->target)) {
+        if (server->debug) {
+            TrapDump(server,ctx->pdu,*ctx->target);
+        }
+        /* SNMP inform trap requires response */
+        if (ctx->pdu.get_type() == sNMP_PDU_INFORM) {
+            Pdu pdu = ctx->pdu;
+            server->trap.snmp->response(pdu,*ctx->target);
+        }
+        /* Call trap handler if configured */
+        if (server->trap.proc) {
+            Ns_ThreadCreate(TrapThread,(void *)ctx, 0, NULL);
+            return NS_TRUE;
+        }
     }
     delete ctx;
     return NS_TRUE;
@@ -691,11 +748,12 @@ static void TrapThread(void *arg)
     TrapContext *ctx = (TrapContext *)arg;
     Tcl_Interp *interp = Ns_TclAllocateInterp(((Server*)(ctx->server))->name);
 
-    Tcl_CreateCommand(interp,"ns_trap",TrapCmd,(ClientData)ctx,NULL);
-
-    if(Tcl_Eval(interp,((Server*)(ctx->server))->trap.proc) != TCL_OK) Ns_TclLogError(interp);
-
+    Ns_TlsSet(&trapTls, ctx);
+    if (Tcl_Eval(interp,((Server*)(ctx->server))->trap.proc) != TCL_OK) {
+        Ns_TclLogError(interp);
+    }
     Ns_TclDeAllocateInterp(interp);
+    Ns_TlsSet(&trapTls, 0);
     delete ctx;
 }
 
@@ -715,55 +773,74 @@ static void TrapThread(void *arg)
  *----------------------------------------------------------------------
  */
 
-static int TrapCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
+static int TrapCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
-    TrapContext *ctx = (TrapContext *)arg;
+    int cmd;
+    enum commands {
+        cmdOid, cmdType, cmdUptime,
+        cmdEnterprise, cmdAddress, cmdVb
+    };
 
-    if (argc < 2) {
-      Tcl_AppendResult(interp, "wrong # args: should be \"",argv[0], "vb|type|oid|address","\"", NULL);
-      return TCL_ERROR;
+    static const char *sCmd[] = {
+        "oid", "type", "uptime",
+        "enterprise", "address", "vb",
+        0
+    };
+
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "args");
+        return TCL_ERROR;
     }
-    Tcl_ResetResult(interp);
+    if (Tcl_GetIndexFromObj(interp, objv[1], sCmd, "command", TCL_EXACT, (int *)&cmd) != TCL_OK) {
+        return TCL_ERROR;
+    }
+    Oid id;
+    TimeTicks tm;
+    TrapContext *ctx = (TrapContext *)Ns_TlsGet(&trapTls);
+    switch(cmd) {
+     case cmdOid:
+        ctx->pdu.get_notify_id(id);
+        Tcl_AppendResult(interp, id.get_printable(), 0);
+        break;
 
-    if(!strcmp(argv[1],"oid")) {
-      Oid id;
-      ctx->pdu.get_notify_id(id);
-      Tcl_AppendResult(interp,id.get_printable(),0);
-    } else
-    if(!strcmp(argv[1],"type")) {
-      Tcl_AppendResult(interp,PduTypeStr(ctx->pdu.get_type()),0);
-    } else
-    if(!strcmp(argv[1],"uptime")) {
-      TimeTicks tm;
-      ctx->pdu.get_notify_timestamp(tm);
-      Tcl_AppendResult(interp,tm.get_printable(),0);
-    } else
-    if(!strcmp(argv[1],"enterprise")) {
-      Oid id;
-      ctx->pdu.get_notify_enterprise(id);
-      Tcl_AppendResult(interp,id.get_printable(),0);
-    } else
-    if(!strcmp(argv[1],"address")) {
-      GenAddress addr;
-      ctx->target->get_address(addr);
-      char *s,*saddr = (char*)addr.get_printable();
-      if((s = strchr(saddr,'/'))) *s = 0;
-      Tcl_AppendResult(interp,saddr,0);
-    } else
-    if(!strcmp(argv[1],"vb")) {
-      Vb vb;
-      Tcl_Obj *obj,*list = Tcl_NewListObj(0,0);
-      for(int i = 0; i < ctx->pdu.get_vb_count(); i++) {
-        ctx->pdu.get_vb(vb,i);
-        obj = Tcl_NewListObj(0,0);
-        Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_oid(),-1));
-        Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(SyntaxStr(vb.get_syntax()),-1));
-        Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_value(),-1));
-        Tcl_ListObjAppendElement(interp,list,obj);
-      }
-      Tcl_SetObjResult(interp,list);
-    } else
-      return TCL_ERROR;
+     case cmdType:
+        Tcl_AppendResult(interp,PduTypeStr(ctx->pdu.get_type()),0);
+        break;
+
+     case cmdUptime:
+        ctx->pdu.get_notify_timestamp(tm);
+        Tcl_AppendResult(interp,tm.get_printable(),0);
+        break;
+
+     case cmdEnterprise:
+        ctx->pdu.get_notify_enterprise(id);
+        Tcl_AppendResult(interp,id.get_printable(),0);
+        break;
+
+     case cmdAddress: {
+        GenAddress addr;
+        ctx->target->get_address(addr);
+        char *s,*saddr = (char*)addr.get_printable();
+        if ((s = strchr(saddr,'/'))) *s = 0;
+        Tcl_AppendResult(interp,saddr,0);
+        break;
+     }
+
+     case cmdVb: {
+        Vb vb;
+        Tcl_Obj *obj,*list = Tcl_NewListObj(0,0);
+        for (int i = 0; i < ctx->pdu.get_vb_count(); i++) {
+            ctx->pdu.get_vb(vb,i);
+            obj = Tcl_NewListObj(0,0);
+            Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char*)vb.get_printable_oid(),-1));
+            Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(SyntaxStr(vb.get_syntax()),-1));
+            Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char*)vb.get_printable_value(),-1));
+            Tcl_ListObjAppendElement(interp, list, obj);
+        }
+        Tcl_SetObjResult(interp,list);
+        break;
+     }
+    }
     return TCL_OK;
 }
 
@@ -806,11 +883,11 @@ static void TrapDump(Server *server,Pdu &pdu,SnmpTarget &target)
                          id.get_printable(),
                          PduTypeStr(pdu.get_type()));
     for (int i = 0; i < pdu.get_vb_count(); i++) {
-      pdu.get_vb(vb,i);
-      Ns_DStringPrintf(&ds,"%s {%s} {%s} ",
-                           vb.get_printable_oid(),
-                           SyntaxStr(vb.get_syntax()),
-                           vb.get_printable_value());
+        pdu.get_vb(vb,i);
+        Ns_DStringPrintf(&ds,"%s {%s} {%s} ",
+                         vb.get_printable_oid(),
+                         SyntaxStr(vb.get_syntax()),
+                         vb.get_printable_value());
     }
     Ns_Log(Debug,"nssnmp: %s",Ns_DStringValue(&ds));
     Ns_DStringFree(&ds);
@@ -819,9 +896,9 @@ static void TrapDump(Server *server,Pdu &pdu,SnmpTarget &target)
 static int UdpListen(char *address,int port)
 {
     int sock;
-    if((sock = Ns_SockListenUdp(address,port)) == -1) {
-      Ns_Log(Error,"nssnmp: couldn't create socket: %s:%d: %s",address,port,strerror(errno));
-      return -1;
+    if ((sock = Ns_SockListenUdp(address,port)) == -1) {
+        Ns_Log(Error,"nssnmp: couldn't create socket: %s:%d: %s",address,port,strerror(errno));
+        return -1;
     }
     return sock;
 }
@@ -916,8 +993,11 @@ static SnmpSession *SessionFind(Server *server,unsigned long id)
 {
    SnmpSession *session;
    Ns_MutexLock(&server->snmpMutex);
-   for(session = (SnmpSession*)server->sessions;session;session = (SnmpSession*)session->next)
-     if(session->id == id) break;
+   for (session = (SnmpSession*)server->sessions;session;session = (SnmpSession*)session->next) {
+       if (session->id == id) {
+           break;
+       }
+   }
    Ns_MutexUnlock(&server->snmpMutex);
    return session;
 }
@@ -945,15 +1025,15 @@ static void SessionGC(void *arg)
     time_t now = time(0);
 
     Ns_MutexLock(&server->snmpMutex);
-    for(session = (SnmpSession*)server->sessions;session;) {
-      if(now - session->access_time > server->idle_timeout) {
-        SnmpSession *next = (SnmpSession*)session->next;
-        Ns_Log(Notice,"ns_snmp: GC: inactive session %ld: %s",session->id,session->addr->get_printable());
-        SessionUnlink(server,session,0);
-        session = next;
-        continue;
-      }
-      session = (SnmpSession*)session->next;
+    for (session = (SnmpSession*)server->sessions;session;) {
+        if (now - session->access_time > server->idle_timeout) {
+            SnmpSession *next = (SnmpSession*)session->next;
+            Ns_Log(Notice,"ns_snmp: GC: inactive session %ld: %s",session->id,session->addr->get_printable());
+            SessionUnlink(server,session,0);
+            session = next;
+            continue;
+        }
+        session = (SnmpSession*)session->next;
     }
     Ns_MutexUnlock(&server->snmpMutex);
 }
@@ -976,11 +1056,15 @@ static void SessionGC(void *arg)
 
 static void SessionLink(Server *server,SnmpSession* session)
 {
-    if(!session) return;
+    if (!session) {
+        return;
+    }
     Ns_MutexLock(&server->snmpMutex);
     session->id = ++server->sessionID;
     session->next = server->sessions;
-    if(server->sessions) server->sessions->prev = session;
+    if (server->sessions) {
+        server->sessions->prev = session;
+    }
     server->sessions = session;
     Ns_MutexUnlock(&server->snmpMutex);
 }
@@ -1004,12 +1088,24 @@ static void SessionLink(Server *server,SnmpSession* session)
 
 static void SessionUnlink(Server *server,SnmpSession* session,int lock)
 {
-    if(!session) return;
-    if(lock) Ns_MutexLock(&server->snmpMutex);
-    if(session->prev) session->prev->next = session->next;
-    if(session->next) session->next->prev = session->prev;
-    if(session == server->sessions) server->sessions = (SnmpSession*)session->next;
-    if(lock) Ns_MutexUnlock(&server->snmpMutex);
+    if (!session) {
+        return;
+    }
+    if (lock) {
+        Ns_MutexLock(&server->snmpMutex);
+    }
+    if (session->prev) {
+        session->prev->next = session->next;
+    }
+    if (session->next) {
+        session->next->prev = session->prev;
+    }
+    if (session == server->sessions) {
+        server->sessions = (SnmpSession*)session->next;
+    }
+    if (lock) {
+        Ns_MutexUnlock(&server->snmpMutex);
+    }
     delete session;
 }
 
@@ -1080,7 +1176,7 @@ static int SyntaxValid(int syntax)
  *----------------------------------------------------------------------
  */
 
-static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[])
+static int SnmpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
     Server *server = (Server*)arg;
     int cmd,status,id;
@@ -1097,13 +1193,13 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST ob
         "trap", "inform", "destroy", 0
     };
 
-    if(objc < 2) {
-      Tcl_AppendResult(interp, "wrong # args: should be ns_snmp command ?args ...?",0);
-      return TCL_ERROR;
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "args");
+        return TCL_ERROR;
     }
-    if(Tcl_GetIndexFromObj(interp,objv[1],sCmd,"command",TCL_EXACT,(int *)&cmd) != TCL_OK)
-      return TCL_ERROR;
-
+    if (Tcl_GetIndexFromObj(interp, objv[1], sCmd, "command", TCL_EXACT, (int *)&cmd) != TCL_OK) {
+        return TCL_ERROR;
+    }
     switch(cmd) {
      case cmdGc:
         SessionGC(0);
@@ -1113,10 +1209,10 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST ob
         // List opened sessions
         Tcl_Obj *list = Tcl_NewListObj(0,0);
         Ns_MutexLock(&server->snmpMutex);
-        for(session = server->sessions;session;session = session->next) {
-          Tcl_ListObjAppendElement(interp,list,Tcl_NewIntObj(session->id));
-          Tcl_ListObjAppendElement(interp,list,Tcl_NewIntObj(session->access_time));
-          Tcl_ListObjAppendElement(interp,list,Tcl_NewStringObj((char*)session->addr->get_printable(),-1));
+        for (session = server->sessions;session;session = session->next) {
+            Tcl_ListObjAppendElement(interp,list,Tcl_NewIntObj(session->id));
+            Tcl_ListObjAppendElement(interp,list,Tcl_NewIntObj(session->access_time));
+            Tcl_ListObjAppendElement(interp,list,Tcl_NewStringObj((char*)session->addr->get_printable(),-1));
         }
         Ns_MutexUnlock(&server->snmpMutex);
         Tcl_SetObjResult(interp,list);
@@ -1131,38 +1227,39 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST ob
         char *community = server->community;
         char *writecommunity = server->writecommunity;
 
-        if(objc < 3) {
-          Tcl_AppendResult(interp,"wrong # args: should be ns_snmp create host ?-port? ?-timeout? ?-retries? ?-version? ?-bulk? ?-community? ?-writecommunity?",0);
-          return TCL_ERROR;
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "host ?-port? ?-timeout? ?-retries? ?-version? ?-bulk? ?-community? ?-writecommunity?");
+            return TCL_ERROR;
         }
 
-        for(int i = 3;i < objc-1;i = i+2) {
-          if(!strcmp(Tcl_GetStringFromObj(objv[i],0),"-port"))
-            Tcl_GetIntFromObj(interp,objv[i+1],&port);
-          else
-          if(!strcmp(Tcl_GetStringFromObj(objv[i],0),"-timeout"))
-            Tcl_GetIntFromObj(interp,objv[i+1],&timeout);
-          else
-          if(!strcmp(Tcl_GetStringFromObj(objv[i],0),"-retries"))
-            Tcl_GetIntFromObj(interp,objv[i+1],&retries);
-          else
-          if(!strcmp(Tcl_GetStringFromObj(objv[i],0),"-version"))
-            Tcl_GetIntFromObj(interp,objv[i+1],&version);
-          else
-          if(!strcmp(Tcl_GetStringFromObj(objv[i],0),"-bulk"))
-            Tcl_GetIntFromObj(interp,objv[i+1],&bulk);
-          else
-          if(!strcmp(Tcl_GetStringFromObj(objv[i],0),"-community"))
-            community = Tcl_GetStringFromObj(objv[i+1],0);
-          else
-          if(!strcmp(Tcl_GetStringFromObj(objv[i],0),"-writecommunity"))
-            writecommunity = Tcl_GetStringFromObj(objv[i+1],0);
+        for (int i = 3;i < objc-1;i = i+2) {
+            if (!strcmp(Tcl_GetStringFromObj(objv[i],0), "-port")) {
+                Tcl_GetIntFromObj(interp,objv[i+1], &port);
+            } else
+            if (!strcmp(Tcl_GetStringFromObj(objv[i],0), "-timeout")) {
+                Tcl_GetIntFromObj(interp,objv[i+1], &timeout);
+            } else
+            if (!strcmp(Tcl_GetStringFromObj(objv[i],0), "-retries")) {
+                Tcl_GetIntFromObj(interp,objv[i+1], &retries);
+            } else
+            if (!strcmp(Tcl_GetStringFromObj(objv[i],0), "-version")) {
+                Tcl_GetIntFromObj(interp,objv[i+1], &version);
+            } else
+            if (!strcmp(Tcl_GetStringFromObj(objv[i],0), "-bulk")) {
+                Tcl_GetIntFromObj(interp,objv[i+1], &bulk);
+            } else
+            if (!strcmp(Tcl_GetStringFromObj(objv[i],0), "-community")) {
+                community = Tcl_GetString(objv[i+1]);
+            } else
+            if (!strcmp(Tcl_GetStringFromObj(objv[i],0), "-writecommunity")) {
+                writecommunity = Tcl_GetString(objv[i+1]);
+            }
         }
-        session = new SnmpSession(Tcl_GetStringFromObj(objv[2],0),port);
-        if(!session->snmp) {
-          delete session;
-          Tcl_AppendResult(interp,"noHost: wrong host or port: ",Tcl_GetStringFromObj(objv[2],0),0);
-          return TCL_ERROR;
+        session = new SnmpSession(Tcl_GetStringFromObj(objv[2],0), port);
+        if (!session->snmp) {
+            delete session;
+            Tcl_AppendResult(interp,"noHost: wrong host or port: ",Tcl_GetStringFromObj(objv[2], 0),0);
+            return TCL_ERROR;
         }
         session->bulk = bulk;
         session->target.set_version(version==1?version1:version2c);
@@ -1171,7 +1268,7 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST ob
         session->target.set_readcommunity(community);
         session->target.set_writecommunity(writecommunity?writecommunity:community);
         SessionLink(server,session);
-        Tcl_SetObjResult(interp,Tcl_NewIntObj(session->id));
+        Tcl_SetObjResult(interp, Tcl_NewIntObj(session->id));
         return TCL_OK;
      }
      case cmdConfig:
@@ -1183,11 +1280,13 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST ob
      case cmdDestroy:
          break;
     }
-    if(Tcl_GetIntFromObj(interp,objv[2],&id) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetIntFromObj(interp,objv[2],&id) != TCL_OK) {
+        return TCL_ERROR;
+    }
     /* All other commands require existig sesion */
-    if(!(session = SessionFind(server,id))) {
-      Tcl_AppendResult(interp,"wrong session #s",0);
-      return TCL_ERROR;
+    if (!(session = SessionFind(server,id))) {
+        Tcl_AppendResult(interp,"wrong session #s",0);
+        return TCL_ERROR;
     }
     session->access_time = time(0);
 
@@ -1197,180 +1296,184 @@ static int SnmpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST ob
      case cmdCreate:
         break;
      case cmdConfig:
-        if(objc < 4) {
-          Tcl_AppendResult(interp,"wrong # args: should be ns_snmp config #s name",0);
-          return TCL_ERROR;
+        if (objc < 4) {
+            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp config #s name",0);
+            return TCL_ERROR;
         }
-        if(!strcmp(Tcl_GetStringFromObj(objv[3],0),"-address")) {
-          IpAddress ipaddr = *session->addr;
-          Tcl_AppendResult(interp,ipaddr.get_printable(),0);
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-address")) {
+            IpAddress ipaddr = *session->addr;
+            Tcl_AppendResult(interp,ipaddr.get_printable(),0);
         } else
-        if(!strcmp(Tcl_GetStringFromObj(objv[3],0),"-port")) {
-          char tmp[32];
-          sprintf(tmp,"%d",session->addr->get_port());
-          Tcl_AppendResult(interp,tmp,0);
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-port")) {
+            char tmp[32];
+            sprintf(tmp,"%d",session->addr->get_port());
+            Tcl_AppendResult(interp,tmp,0);
         } else
-        if(!strcmp(Tcl_GetStringFromObj(objv[3],0),"-community")) {
-          OctetStr community;
-          session->target.get_readcommunity(community);
-          Tcl_AppendResult(interp,community.get_printable(),0);
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-community")) {
+            OctetStr community;
+            session->target.get_readcommunity(community);
+            Tcl_AppendResult(interp,community.get_printable(),0);
         } else
-        if(!strcmp(Tcl_GetStringFromObj(objv[3],0),"-writecommunity")) {
-          OctetStr community;
-          session->target.get_writecommunity(community);
-          Tcl_AppendResult(interp,community.get_printable(),0);
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-writecommunity")) {
+            OctetStr community;
+            session->target.get_writecommunity(community);
+            Tcl_AppendResult(interp,community.get_printable(),0);
         } else
-        if(!strcmp(Tcl_GetStringFromObj(objv[3],0),"-timeout")) {
-          char tmp[32];
-          sprintf(tmp,"%ld",session->target.get_timeout());
-          Tcl_AppendResult(interp,tmp,0);
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-timeout")) {
+            char tmp[32];
+            sprintf(tmp,"%ld",session->target.get_timeout());
+            Tcl_AppendResult(interp,tmp,0);
         } else
-        if(!strcmp(Tcl_GetStringFromObj(objv[3],0),"-version")) {
-          char tmp[32];
-          sprintf(tmp,"%d",session->target.get_version()+1);
-          Tcl_AppendResult(interp,tmp,0);
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-version")) {
+            char tmp[32];
+            sprintf(tmp,"%d",session->target.get_version()+1);
+            Tcl_AppendResult(interp,tmp,0);
         } else
-        if(!strcmp(Tcl_GetStringFromObj(objv[3],0),"-retries")) {
-          char tmp[32];
-          sprintf(tmp,"%d",session->target.get_retry());
-          Tcl_AppendResult(interp,tmp,0);
+        if (!strcmp(Tcl_GetStringFromObj(objv[3],0),"-retries")) {
+            char tmp[32];
+            sprintf(tmp,"%d",session->target.get_retry());
+            Tcl_AppendResult(interp,tmp,0);
         }
         break;
 
      case cmdGet: {
-        if(objc < 4) {
-          Tcl_AppendResult(interp,"wrong # args: should be ns_snmp get #s vb ...",0);
-          return TCL_ERROR;
+        if (objc < 4) {
+            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp get #s vb ...",0);
+            return TCL_ERROR;
         }
         SnmpVb vb;
         Oid oid;
         session->pdu.set_vblist(&vb,0);
-        for(int i = 3;i < objc;i++) {
-          oid = Tcl_GetStringFromObj(objv[i],0);
-          if(!oid.valid()) {
-            Tcl_AppendResult(interp,"invalid OID ",Tcl_GetStringFromObj(objv[i],0),0);
-            return TCL_ERROR;
-          }
-          vb.set_oid(oid);
-          session->pdu += vb;
+        for (int i = 3;i < objc;i++) {
+             oid = Tcl_GetStringFromObj(objv[i],0);
+             if (!oid.valid()) {
+                 Tcl_AppendResult(interp,"invalid OID ",Tcl_GetStringFromObj(objv[i],0),0);
+                 return TCL_ERROR;
+             }
+             vb.set_oid(oid);
+             session->pdu += vb;
         }
-        if((status = session->snmp->get(session->pdu,session->target)) != SNMP_CLASS_SUCCESS) {
-          Tcl_AppendResult(interp,SnmpError(session,status),0);
-          return TCL_ERROR;
+        if ((status = session->snmp->get(session->pdu,session->target)) != SNMP_CLASS_SUCCESS) {
+            Tcl_AppendResult(interp,SnmpError(session,status),0);
+            return TCL_ERROR;
         }
         Tcl_Obj *obj,*list = Tcl_NewListObj(0,0);
-        for(int i = 0; i < session->pdu.get_vb_count(); i++) {
-          session->pdu.get_vb(vb,i);
-          if(!SyntaxValid(vb.get_syntax())) continue;
-          obj = Tcl_NewListObj(0,0);
-          Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_oid(),-1));
-          Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(SyntaxStr(vb.get_syntax()),-1));
-          Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_value(),-1));
-          Tcl_ListObjAppendElement(interp,list,obj);
+        for (int i = 0; i < session->pdu.get_vb_count(); i++) {
+            session->pdu.get_vb(vb,i);
+            if (!SyntaxValid(vb.get_syntax())) {
+                continue;
+            }
+            obj = Tcl_NewListObj(0,0);
+            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_oid(),-1));
+            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(SyntaxStr(vb.get_syntax()),-1));
+            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_value(),-1));
+            Tcl_ListObjAppendElement(interp,list,obj);
         }
         Tcl_SetObjResult(interp,list);
         break;
      }
      case cmdWalk: {
-        if(objc < 6) {
-          Tcl_AppendResult(interp,"wrong # args: should be ns_snmp walk #s OID var script",0);
-          return TCL_ERROR;
+        if (objc < 6) {
+            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp walk #s OID var script",0);
+            return TCL_ERROR;
         }
         SnmpVb vb;
         Tcl_Obj *obj;
         Oid oid(Tcl_GetStringFromObj(objv[3],0));
-        if(!oid.valid()) {
-          Tcl_AppendResult(interp,"invalid OID ",Tcl_GetStringFromObj(objv[3],0),0);
-          return TCL_ERROR;
+        if (!oid.valid()) {
+            Tcl_AppendResult(interp,"invalid OID ",Tcl_GetStringFromObj(objv[3],0),0);
+            return TCL_ERROR;
         }
         char *oidStr = (char*)oid.get_printable();
         vb.set_oid(oid);
         session->pdu.set_vblist(&vb,1);
-        while((status = session->snmp->get_bulk(session->pdu,session->target,0,session->bulk)) == SNMP_CLASS_SUCCESS) {
-          for(int i = 0;i < session->pdu.get_vb_count();i++) {
-            session->pdu.get_vb(vb,i);
-            if(!SyntaxValid(vb.get_syntax()) ||
-               strncmp(vb.get_printable_oid(),oidStr,strlen(oidStr))) goto done;
-            obj = Tcl_NewListObj(0,0);
-            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj((char*)vb.get_printable_oid(),-1));
-            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(SyntaxStr(vb.get_syntax()),-1));
-            Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(vb.get_printable_value(),-1));
-            if(Tcl_SetVar2Ex(interp,Tcl_GetStringFromObj(objv[4],0),NULL,obj,TCL_LEAVE_ERR_MSG) == NULL) return TCL_ERROR;
-            switch(Tcl_Eval(interp,Tcl_GetStringFromObj(objv[5],0))) {
-             case TCL_OK:
-             case TCL_CONTINUE: break;
-             case TCL_BREAK: goto done;
-             case TCL_ERROR: {
-                 char msg[100];
-                 sprintf(msg, "\n\t(\"ns_snmp walk\" body line %d)",interp->errorLine);
-                 Tcl_AddErrorInfo(interp,msg);
-                 goto done;
-             }
-            }
+        while((status = session->snmp->get_bulk(session->pdu,session->target, 0, session->bulk)) == SNMP_CLASS_SUCCESS) {
+          for (int i = 0;i < session->pdu.get_vb_count();i++) {
+              session->pdu.get_vb(vb,i);
+              if (!SyntaxValid(vb.get_syntax()) || strncmp(vb.get_printable_oid(), oidStr, strlen(oidStr))) {
+                  goto done;
+              }
+              obj = Tcl_NewListObj(0,0);
+              Tcl_ListObjAppendElement(interp,obj, Tcl_NewStringObj((char*)vb.get_printable_oid(), -1));
+              Tcl_ListObjAppendElement(interp,obj, Tcl_NewStringObj(SyntaxStr(vb.get_syntax()), -1));
+              Tcl_ListObjAppendElement(interp,obj, Tcl_NewStringObj(vb.get_printable_value(), -1));
+              if (Tcl_SetVar2Ex(interp, Tcl_GetStringFromObj(objv[4],0), NULL, obj, TCL_LEAVE_ERR_MSG) == NULL) {
+                  return TCL_ERROR;
+              }
+              switch(Tcl_Eval(interp,Tcl_GetStringFromObj(objv[5],0))) {
+               case TCL_OK:
+               case TCL_CONTINUE: break;
+               case TCL_BREAK: goto done;
+               case TCL_ERROR: {
+                  char msg[100];
+                  sprintf(msg, "\n\t(\"ns_snmp walk\" body line %d)",interp->errorLine);
+                  Tcl_AddErrorInfo(interp,msg);
+                  goto done;
+               }
+              }
           }
-          session->pdu.set_vblist(&vb,1);
+          session->pdu.set_vblist(&vb, 1);
         }
 done:
-        if(status != SNMP_CLASS_SUCCESS &&
-           status != SNMP_ERROR_NO_SUCH_NAME &&
-           status != SNMP_ERROR_GENERAL_VB_ERR) {
-          Tcl_SetObjResult(interp,Tcl_NewStringObj((char*)SnmpError(session,status),-1));
-          return TCL_ERROR;
+        if (status != SNMP_CLASS_SUCCESS && status != SNMP_ERROR_NO_SUCH_NAME && status != SNMP_ERROR_GENERAL_VB_ERR) {
+            Tcl_SetObjResult(interp,Tcl_NewStringObj((char*)SnmpError(session,status),-1));
+            return TCL_ERROR;
         }
         break;
      }
      case cmdSet: {
-        if(objc < 6) {
-          Tcl_AppendResult(interp,"wrong # args: should be ns_snmp set #s OID type value",0);
-          return TCL_ERROR;
+        if (objc < 6) {
+            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp set #s OID type value",0);
+            return TCL_ERROR;
         }
         SnmpVb vb;
         Oid oid(Tcl_GetStringFromObj(objv[3],0));
         char *type = Tcl_GetStringFromObj(objv[4],0);
         char *value = Tcl_GetStringFromObj(objv[5],0);
         vb.set_oid(oid);
-        if(vb.SetValue(type,value) != TCL_OK) {
-          Tcl_AppendResult(interp,"invalid variable type, should one of i,u,t,a,o,s",0);
-          return TCL_ERROR;
+        if (vb.SetValue(type,value) != TCL_OK) {
+            Tcl_AppendResult(interp,"invalid variable type, should one of i,u,t,a,o,s",0);
+            return TCL_ERROR;
         }
         session->pdu.set_vblist(&vb,1);
-        if((status = session->snmp->set(session->pdu,session->target)) != SNMP_CLASS_SUCCESS) {
-          Tcl_AppendResult(interp,SnmpError(session,status),0);
-          return TCL_ERROR;
+        if ((status = session->snmp->set(session->pdu,session->target)) != SNMP_CLASS_SUCCESS) {
+            Tcl_AppendResult(interp,SnmpError(session,status),0);
+            return TCL_ERROR;
         }
         break;
      }
      case cmdTrap:
      case cmdInform: {
-        if(objc < 5) {
-          Tcl_AppendResult(interp,"wrong # args: should be ns_snmp trap #s ID EnterpriseID ?oid type value oid type value ...?",0);
-          return TCL_ERROR;
+        if (objc < 5) {
+            Tcl_AppendResult(interp,"wrong # args: should be ns_snmp trap #s ID EnterpriseID ?oid type value oid type value ...?",0);
+            return TCL_ERROR;
         }
         Oid tid(Tcl_GetString(objv[3]));
         Oid eid(Tcl_GetString(objv[4]));
-        for(int i = 5;i < objc - 2;i += 3) { 
-          SnmpVb vb;
-          Oid oid(Tcl_GetString(objv[i]));
-          char *type = Tcl_GetString(objv[i+1]);
-          char *value = Tcl_GetString(objv[i+2]);
-          vb.set_oid(oid);
-          if(vb.SetValue(type,value) != TCL_OK) {
-            Tcl_AppendResult(interp,"invalid variable type, should one of i,u,t,a,o,s",0);
-            return TCL_ERROR;
-          }
-          session->pdu += vb;
+        for (int i = 5;i < objc - 2;i += 3) { 
+            SnmpVb vb;
+            Oid oid(Tcl_GetString(objv[i]));
+            char *type = Tcl_GetString(objv[i+1]);
+            char *value = Tcl_GetString(objv[i+2]);
+            vb.set_oid(oid);
+            if (vb.SetValue(type,value) != TCL_OK) {
+                Tcl_AppendResult(interp,"invalid variable type, should one of i,u,t,a,o,s",0);
+                return TCL_ERROR;
+            }
+            session->pdu += vb;
         }
         session->pdu.set_notify_id(tid);
         session->pdu.set_notify_enterprise(eid);
-        if(cmd == cmdTrap)
-          status = session->snmp->trap(session->pdu,session->target);
-        else
-          status = session->snmp->inform(session->pdu,session->target);
-        if(status != SNMP_CLASS_SUCCESS) {
-          Tcl_AppendResult(interp,SnmpError(session,status),0);
-          return TCL_ERROR;
+        if (cmd == cmdTrap) {
+            status = session->snmp->trap(session->pdu,session->target);
+        } else {
+            status = session->snmp->inform(session->pdu,session->target);
         }
-        break; 
+        if (status != SNMP_CLASS_SUCCESS) {
+            Tcl_AppendResult(interp,SnmpError(session,status),0);
+            return TCL_ERROR;
+        }
+        break;
      }
      case cmdDestroy:
         SessionUnlink(server,session,1);
@@ -1381,16 +1484,20 @@ done:
 
 char *SnmpString::get_printable()
 {
-    for(unsigned long i=0;i < smival.value.string.len;i++){
-      if((smival.value.string.ptr[i] != '\r') &&
-         (smival.value.string.ptr[i] != '\n')&&
-         (isprint((int) (smival.value.string.ptr[i])) == 0))
-        return(get_printable_hex());
+    for (unsigned long i=0;i < smival.value.string.len;i++){
+        if ((smival.value.string.ptr[i] != '\r') &&
+            (smival.value.string.ptr[i] != '\n') &&
+            (isprint((int) (smival.value.string.ptr[i])) == 0)) {
+            return(get_printable_hex());
+        }
     }
-    if(output_buffer) delete [] output_buffer;
+    if (output_buffer) {
+        delete [] output_buffer;
+    }
     output_buffer = new char[smival.value.string.len + 1];
-    if(smival.value.string.len)
-      memcpy(output_buffer,smival.value.string.ptr,(unsigned int)smival.value.string.len);
+    if (smival.value.string.len) {
+        memcpy(output_buffer,smival.value.string.ptr,(unsigned int)smival.value.string.len);
+    }
     output_buffer[smival.value.string.len] = '\0';
     return(output_buffer);
 }
@@ -1401,12 +1508,14 @@ char *SnmpString::get_printable_hex()
     unsigned char *bytes = smival.value.string.ptr;
     char *ptr;
 
-    if(output_buffer) delete [] output_buffer;
+    if (output_buffer) {
+        delete [] output_buffer;
+    }
     ptr = output_buffer = new char[smival.value.string.len*3+1];
-    while(local_len > 0) {
-      sprintf(ptr,"%2.2X ",*bytes++);
-      ptr += 3;
-      local_len--;
+    while (local_len > 0) {
+        sprintf(ptr,"%2.2X ",*bytes++);
+        ptr += 3;
+        local_len--;
     }
     return output_buffer;
 }
@@ -1423,29 +1532,29 @@ SnmpString& SnmpString::operator=(unsigned long val)
 char *SnmpVb::get_printable_value()
 {
     /* Take care about hex printable format for strings */
-    switch(get_syntax()) {
+    switch (get_syntax()) {
      case sNMP_SYNTAX_TIMETICKS: {
-         unsigned long val;
-         get_value(val);
-         str = val;
-         value = (char*)str.data();
-         break;
+        unsigned long val;
+        get_value(val);
+        str = val;
+        value = (char*)str.data();
+        break;
      }
      case sNMP_SYNTAX_BITS:
      case sNMP_SYNTAX_OPAQUE:
      case sNMP_SYNTAX_OCTETS:
-         get_value(str);
-         value = str.get_printable();
-         break;
+        get_value(str);
+        value = str.get_printable();
+        break;
      default:
-         value = (char*)Vb::get_printable_value();
+        value = (char*)Vb::get_printable_value();
     }
     return value;
 }
 
 int SnmpVb::SetValue(char *type,char *value)
 {
-   switch(type[0]) {
+   switch (type[0]) {
     case 'i':
        set_value((long)atol(value));
        break;
@@ -1454,22 +1563,38 @@ int SnmpVb::SetValue(char *type,char *value)
        break;
     case 't': {
        TimeTicks tm(atol(value));
-       if(tm.valid()) set_value(tm); else return TCL_ERROR;
+       if (tm.valid()) {
+           set_value(tm);
+       } else {
+           return TCL_ERROR;
+       }
        break;
     }
     case 'a': {
        IpAddress ipaddr(value);
-       if(ipaddr.valid()) set_value(ipaddr); else return TCL_ERROR;
+       if (ipaddr.valid()) {
+           set_value(ipaddr);
+       } else {
+           return TCL_ERROR;
+       }
        break;
     }
     case 'o': {
        Oid oid(value);
-       if(oid.valid()) set_value(oid); else return TCL_ERROR;
+       if (oid.valid()) {
+           set_value(oid);
+       } else {
+           return TCL_ERROR;
+       }
        break;
     }
     case 's': {
        OctetStr str(value);
-       if(str.valid()) set_value(str); else return TCL_ERROR;
+       if (str.valid()) {
+           set_value(str);
+       } else {
+           return TCL_ERROR;
+       }
        break;
     }
     default:
@@ -1478,289 +1603,317 @@ int SnmpVb::SetValue(char *type,char *value)
    return TCL_OK;
 }
 
-static int MibCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
+static int MibCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
     Server *server = (Server*)arg;
     MibEntry *mib = 0;
     char *lastOctet = 0;
     Tcl_HashEntry *entry;
+    enum commands {
+        cmdLabels, cmdSet, cmdName,
+        cmdValue, cmdOid, cmdLabel, cmdModule,
+        cmdSyntax, cmdInfo, cmdHint
+    };
+    static const char *sCmd[] = {
+        "labels", "set", "name",
+        "value", "oid", "label", "module",
+        "syntax", "info", "hint", 0
+    };
+    int cmd;
 
-    if (argc < 2) {
-      Tcl_AppendResult(interp, "wrong # args: should be \"",argv[0], " labels","\"", NULL);
-      return TCL_ERROR;
-    }
-
-    if(!strcmp(argv[1],"labels")) {
-      char *pattern = (argc > 2 ? (char*)argv[2] : 0);
-      char *syntax = (argc > 3 ? (char*)argv[3] : 0);
-      Tcl_HashSearch search;
-
-      Ns_MutexLock(&server->mibMutex);
-      entry = Tcl_FirstHashEntry(&server->mib,&search);
-      while(entry) {
-        if((mib = (MibEntry*)Tcl_GetHashValue(entry))) {
-          if(!syntax || Tcl_RegExpMatch(interp,mib->syntax,syntax)) {
-            if(!pattern || Tcl_RegExpMatch(interp,mib->label,pattern))
-              Tcl_AppendResult(interp,mib->label," ",0);
-          }
-        }
-        entry = Tcl_NextHashEntry(&search);
-      }
-      Ns_MutexUnlock(&server->mibMutex);
-      return TCL_OK;
-    }
-
-    if (argc < 3) {
-      Tcl_AppendResult(interp, "wrong # args: should be \"",argv[0], " set|name|value|oid|label|module|syntax|info","\"", NULL);
-      return TCL_ERROR;
-    }
-
-    if(!strcmp(argv[1],"set")) {
-      if(argc < 6) {
-        Tcl_AppendResult(interp,argv[0]," set oid module label syntax hint enum(N) ...",0);
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "args");
         return TCL_ERROR;
-      }
-      int flag, enumidx = 7;
-      Ns_MutexLock(&server->mibMutex);
-      entry = Tcl_CreateHashEntry(&server->mib,argv[2],&flag);
-      if(flag) {
-        mib = (MibEntry*)ns_calloc(1,sizeof(MibEntry));
-        mib->oid = strdup(argv[2]);
-        mib->module = strdup(argv[3]);
-        mib->label = strdup(argv[4]);
-        mib->syntax = strdup(argv[5]);
-        /* Enumeration for integer type, hint can be skipped */
-        if(!strcmp(argv[5],"Integer32")) {
-          if(argc > 6 && argv[6][0]) {
-            if(strchr(argv[6],'(')) {
-              enumidx = 6;
-            } else {
-              mib->hint = strdup(argv[6]);
-            }
-          }
-          for(int i = enumidx;i < argc; i++) {
-            char *s = strchr(argv[i],'(');
-            if(!s) break;
-            char *e = strchr(s,')');
-            if(!e) break;
-            *s++ = 0;*e = 0;
-            mib->Enum.count++;
-            mib->Enum.names = (char**)ns_realloc(mib->Enum.names,sizeof(char**)*mib->Enum.count);
-            mib->Enum.values = (short*)ns_realloc(mib->Enum.values,sizeof(short)*mib->Enum.count);
-            mib->Enum.names[mib->Enum.count-1] = ns_strdup(argv[i]);
-            mib->Enum.values[mib->Enum.count-1] = atoi(s);
-          }
-        } else
-        if(argc > 6 && argv[6][0]) {
-          mib->hint = strdup(argv[6]);
-        }
+    }
+    if (Tcl_GetIndexFromObj(interp, objv[1], sCmd, "command", TCL_EXACT, (int *)&cmd) != TCL_OK) {
+        return TCL_ERROR;
+    }
+    switch (cmd) {
+     case cmdLabels: {
+        char *pattern = (objc > 2 ? Tcl_GetString(objv[2]) : 0);
+        char *syntax = (objc > 3 ? Tcl_GetString(objv[3]) : 0);
+        Tcl_HashSearch search;
 
-        Tcl_SetHashValue(entry,mib);
-        entry = Tcl_CreateHashEntry(&server->mib,argv[4],&flag);
-        Tcl_SetHashValue(entry,mib);
-      }
-      Ns_MutexUnlock(&server->mibMutex);
-      return TCL_OK;
+        Ns_MutexLock(&server->mibMutex);
+        entry = Tcl_FirstHashEntry(&server->mib,&search);
+        while (entry) {
+            if ((mib = (MibEntry*)Tcl_GetHashValue(entry))) {
+                if (!syntax || Tcl_RegExpMatch(interp, mib->syntax, syntax)) {
+                    if (!pattern || Tcl_RegExpMatch(interp, mib->label, pattern)) {
+                        Tcl_AppendResult(interp, mib->label, " ", 0);
+                    }
+                }
+            }
+            entry = Tcl_NextHashEntry(&search);
+        }
+        Ns_MutexUnlock(&server->mibMutex);
+        return TCL_OK;
+     }
+    }
+    if (objc < 3) {
+        Tcl_WrongNumArgs(interp, 2, objv, "oid");
+        return TCL_ERROR;
+    }
+
+    switch (cmd) {
+     case cmdSet:
+        if (objc < 6) {
+            Tcl_WrongNumArgs(interp, 2, objv, "oid module label syntax hint enum(N) ...");
+            return TCL_ERROR;
+        }
+        int flag, enumidx = 7;
+        Ns_MutexLock(&server->mibMutex);
+        entry = Tcl_CreateHashEntry(&server->mib,Tcl_GetString(objv[2]), &flag);
+        if (flag) {
+            mib = (MibEntry*)ns_calloc(1,sizeof(MibEntry));
+            mib->oid = strdup(Tcl_GetString(objv[2]));
+            mib->module = strdup(Tcl_GetString(objv[3]));
+            mib->label = strdup(Tcl_GetString(objv[4]));
+            mib->syntax = strdup(Tcl_GetString(objv[5]));
+            /* Enumeration for integer type, hint can be skipped */
+            if (!strcmp(Tcl_GetString(objv[5]), "Integer32")) {
+                if (objc > 6 && Tcl_GetString(objv[6])[0]) {
+                    if (strchr(Tcl_GetString(objv[6]),'(')) {
+                        enumidx = 6;
+                    } else {
+                        mib->hint = strdup(Tcl_GetString(objv[6]));
+                    }
+                }
+                for (int i = enumidx;i < objc; i++) {
+                    char *s = strchr(Tcl_GetString(objv[i]),'(');
+                    if (!s) break;
+                    char *e = strchr(s,')');
+                    if (!e) break;
+                    *s++ = 0;*e = 0;
+                    mib->Enum.count++;
+                    mib->Enum.names = (char**)ns_realloc(mib->Enum.names,sizeof(char**)*mib->Enum.count);
+                    mib->Enum.values = (short*)ns_realloc(mib->Enum.values,sizeof(short)*mib->Enum.count);
+                    mib->Enum.names[mib->Enum.count-1] = ns_strdup(Tcl_GetString(objv[i]));
+                    mib->Enum.values[mib->Enum.count-1] = atoi(s);
+                }
+            } else
+            if (objc > 6 && Tcl_GetString(objv[6])[0]) {
+                mib->hint = strdup(Tcl_GetString(objv[6]));
+            }
+            Tcl_SetHashValue(entry,mib);
+            entry = Tcl_CreateHashEntry(&server->mib, Tcl_GetString(objv[4]), &flag);
+            Tcl_SetHashValue(entry,mib);
+        }
+        Ns_MutexUnlock(&server->mibMutex);
+        return TCL_OK;
     }
 
     Ns_MutexLock(&server->mibMutex);
-    if(!(entry = Tcl_FindHashEntry(&server->mib,argv[2]))) {
-      /* Try without last octet */
-      if((lastOctet = strrchr(argv[2],'.'))) {
-        *lastOctet = 0;
-        entry = Tcl_FindHashEntry(&server->mib,argv[2]);
-        *lastOctet = '.';
-      }
-    }
-    if(entry) mib = (MibEntry*)Tcl_GetHashValue(entry);
-    Ns_MutexUnlock(&server->mibMutex);
-    if(!entry) {
-      Tcl_AppendResult(interp,argv[2],0);
-      return TCL_OK;
-    }
-
-    if(!strcmp(argv[1],"info")) {
-      Tcl_Obj *obj = Tcl_NewListObj(0,0);
-      Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(mib->oid,-1));
-      Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(mib->module,-1));
-      Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(mib->label,-1));
-      Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(mib->syntax,-1));
-      Tcl_ListObjAppendElement(interp,obj,Tcl_NewStringObj(mib->hint,-1));
-      if(mib->Enum.count) {
-        Tcl_Obj *Enum = Tcl_NewListObj(0,0);
-        for(int i = 0;i < mib->Enum.count;i++) {
-          Tcl_ListObjAppendElement(interp,Enum,Tcl_NewStringObj(mib->Enum.names[i],-1));
-          Tcl_ListObjAppendElement(interp,Enum,Tcl_NewIntObj(mib->Enum.values[i]));
+    if (!(entry = Tcl_FindHashEntry(&server->mib, Tcl_GetString(objv[2])))) {
+        /* Try without last octet */
+        if ((lastOctet = strrchr(Tcl_GetString(objv[2]), '.'))) {
+            *lastOctet = 0;
+            entry = Tcl_FindHashEntry(&server->mib, Tcl_GetString(objv[2]));
+            *lastOctet = '.';
         }
-        Tcl_ListObjAppendElement(interp,obj,Enum);
-      }
-      Tcl_SetObjResult(interp,obj);
-    } else
-
-    if(!strcmp(argv[1],"name")) {
-      Tcl_AppendResult(interp,mib->module,"!",mib->label,0);
-    } else
-
-    if(!strcmp(argv[1],"value")) {
-      if(argc < 4) {
-        Tcl_AppendResult(interp,argv[0]," value OID val",0);
-        return TCL_ERROR;
-      }
-      if(!strcmp(mib->syntax,"OBJECT IDENTIFIER")) {
-        Ns_MutexLock(&server->mibMutex);
-        if((entry = Tcl_FindHashEntry(&server->mib,argv[3])) &&
-           (mib = (MibEntry*)Tcl_GetHashValue(entry)))
-          Tcl_AppendResult(interp,mib->label,0);
-        else
-          Tcl_AppendResult(interp,argv[3],0);
-        Ns_MutexUnlock(&server->mibMutex);
+    }
+    if (entry) {
+        mib = (MibEntry*)Tcl_GetHashValue(entry);
+    }
+    Ns_MutexUnlock(&server->mibMutex);
+    if (!entry) {
+        Tcl_AppendResult(interp, Tcl_GetString(objv[2]), 0);
         return TCL_OK;
-      } else
+    }
 
-      if(!strcmp(mib->syntax,"Integer32")) {
-        if(mib->Enum.count) {
-          int val = atoi(argv[3]);
-          for(int i = 0;i < mib->Enum.count;i++)
-            if(val == mib->Enum.values[i]) {
-              Tcl_AppendResult(interp,mib->Enum.names[i],0);
-              return TCL_OK;
+    switch (cmd) {
+     case cmdInfo: {
+        Tcl_Obj *obj = Tcl_NewListObj(0, 0);
+        Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(mib->oid, -1));
+        Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(mib->module, -1));
+        Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(mib->label, -1));
+        Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(mib->syntax, -1));
+        Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(mib->hint, -1));
+        if (mib->Enum.count) {
+            Tcl_Obj *Enum = Tcl_NewListObj(0, 0);
+            for (int i = 0;i < mib->Enum.count;i++) {
+                Tcl_ListObjAppendElement(interp, Enum, Tcl_NewStringObj(mib->Enum.names[i], -1));
+                Tcl_ListObjAppendElement(interp, Enum, Tcl_NewIntObj(mib->Enum.values[i]));
+            }
+            Tcl_ListObjAppendElement(interp, obj, Enum);
+        }
+        Tcl_SetObjResult(interp, obj);
+        break;
+     }
+
+     case cmdName:
+        Tcl_AppendResult(interp, mib->module, "!", mib->label, 0);
+        break;
+
+     case cmdValue:
+        if (objc < 4) {
+            Tcl_WrongNumArgs(interp, 2, objv, "value OID val");
+            return TCL_ERROR;
+        }
+        if (!strcmp(mib->syntax, "OBJECT IDENTIFIER")) {
+            Ns_MutexLock(&server->mibMutex);
+            if ((entry = Tcl_FindHashEntry(&server->mib, Tcl_GetString(objv[3]))) &&
+                (mib = (MibEntry*)Tcl_GetHashValue(entry))) {
+                Tcl_AppendResult(interp, mib->label, 0);
+            } else {
+                Tcl_AppendResult(interp, Tcl_GetString(objv[3]), 0);
+            }
+            Ns_MutexUnlock(&server->mibMutex);
+            return TCL_OK;
+        } else
+        if (!strcmp(mib->syntax, "Integer32")) {
+            if (mib->Enum.count) {
+                int val = atoi(Tcl_GetString(objv[3]));
+                for (int i = 0;i < mib->Enum.count;i++)
+                    if (val == mib->Enum.values[i]) {
+                        Tcl_AppendResult(interp, mib->Enum.names[i], 0);
+                        return TCL_OK;
+                    }
+            } else
+            if (mib->hint) {
+                FormatIntTC(interp, Tcl_GetString(objv[3]), mib->hint);
+                return TCL_OK;
             }
         } else
-        if(mib->hint) {
-          FormatIntTC(interp,(char*)argv[3],mib->hint);
-          return TCL_OK;
+        if (!strcmp(mib->syntax, "OCTET STRING") && mib->hint) {
+            FormatStringTC(interp, Tcl_GetString(objv[3]), mib->hint);
+            return TCL_OK;
         }
-      } else
+        Tcl_AppendResult(interp, Tcl_GetString(objv[3]), 0);
+        break;
 
-      if(!strcmp(mib->syntax,"OCTET STRING") && mib->hint) {
-        FormatStringTC(interp,(char*)argv[3],mib->hint);
-        return TCL_OK;
-      }
-      Tcl_AppendResult(interp,(char*)argv[3],0);
-    } else
+     case cmdModule:
+        Tcl_AppendResult(interp, mib->module, 0);
+        break;
 
-    if(!strcmp(argv[1],"module")) {
-      Tcl_AppendResult(interp,mib->module,0);
-    } else
+     case cmdLabel:
+        Tcl_AppendResult(interp, mib->label, 0);
+        break;
 
-    if(!strcmp(argv[1],"label")) {
-      Tcl_AppendResult(interp,mib->label,0);
-    } else
+     case cmdOid:
+        Tcl_AppendResult(interp, mib->oid, 0);
+        if (lastOctet) {
+            Tcl_AppendResult(interp, lastOctet, 0);
+        }
+        break;
 
-    if(!strcmp(argv[1],"oid")) {
-      Tcl_AppendResult(interp,mib->oid,0);
-      if(lastOctet) Tcl_AppendResult(interp,lastOctet,0);
-    } else
+     case cmdSyntax:
+        Tcl_AppendResult(interp, mib->syntax, 0);
+        break;
 
-    if(!strcmp(argv[1],"syntax")) {
-      Tcl_AppendResult(interp,mib->syntax,0);
-    } else
-
-    if(!strcmp(argv[1],"hint")) {
-      Tcl_AppendResult(interp,mib->hint,0);
-    } else {
-      Tcl_AppendResult(interp,"invalid command: ",argv[1],0);
-      return TCL_ERROR;
+     case cmdHint:
+        Tcl_AppendResult(interp, mib->hint, 0);
+        break;
     }
     return TCL_OK;
 }
 
 // Calculate checksum for given buffer
-static int IcmpChksum(u_short *p, int n)
+static int IcmpChksum(u_short *p,  int n)
 {
     register u_short answer;
     register long sum = 0;
     u_short odd_byte = 0;
 
-    while(n > 1) {
-      sum += *p++;
-      n -= 2;
+    while (n > 1) {
+        sum += *p++;
+        n -= 2;
     }
-    if(n == 1) {
-      *(u_char *)(&odd_byte) = *(u_char *)p;
-      sum += odd_byte;
+    if (n == 1) {
+        *(u_char *)(&odd_byte) = *(u_char *)p;
+        sum += odd_byte;
     }
     sum = (sum >> 16) + (sum & 0xffff);	/* add hi 16 to low 16 */
     sum += (sum >> 16);			/* add carry */
-    answer = ~sum;			/* ones-complement, truncate*/
+    answer = ~sum;			/* ones-complement,  truncate*/
     return (answer);
 }
 
 static int IcmpLock(Server *server)
 {
-   int fd = -1,count = 3;
+   int fd = -1, count = 3;
    IcmpPort *icmp;
 
    // Get next available socket
    Ns_MutexLock(&server->icmp.mutex);
-   while(--count && fd == -1) {
-     for(icmp = server->icmp.ports;icmp;icmp = icmp->next) {
-       if(!icmp->flag) {
-         icmp->flag = 1;
-         fd = icmp->fd;
-         break;
+   while (--count && fd == -1) {
+       for (icmp = server->icmp.ports;icmp;icmp = icmp->next) {
+            if (!icmp->flag) {
+                icmp->flag = 1;
+                fd = icmp->fd;
+                break;
+            }
        }
-     }
-     if(fd == -1) sleep(1);
+       if (fd == -1) {
+           sleep(1);
+       }
    }
    Ns_MutexUnlock(&server->icmp.mutex);
    return fd;
 }
 
-static void IcmpUnlock(Server *server,int fd)
+static void IcmpUnlock(Server *server, int fd)
 {
-   IcmpPort *icmp,*tail;
+   IcmpPort *icmp, *tail;
 
    Ns_MutexLock(&server->icmp.mutex);
-   for(icmp = server->icmp.ports;icmp;icmp = icmp->next) {
-     if(icmp->fd == fd) {
-       icmp->flag = 0;
-       // Move just used socket to the end of the list
-       if((tail = icmp->next)) {
-         if(icmp->prev) icmp->prev->next = icmp->next;
-         if(icmp->next) icmp->next->prev = icmp->prev;
-         if(!icmp->prev) server->icmp.ports = icmp->next;
-         while(tail->next) tail = tail->next;
-         tail->next = icmp;
-         icmp->prev = tail;
-         icmp->next = 0;
-         break;
+   for (icmp = server->icmp.ports;icmp;icmp = icmp->next) {
+       if (icmp->fd == fd) {
+           icmp->flag = 0;
+           // Move just used socket to the end of the list
+           if ((tail = icmp->next)) {
+               if (icmp->prev) {
+                   icmp->prev->next = icmp->next;
+               }
+               if (icmp->next) {
+                   icmp->next->prev = icmp->prev;
+               }
+               if (!icmp->prev) {
+                   server->icmp.ports = icmp->next;
+               }
+               while (tail->next) {
+                   tail = tail->next;
+               }
+               tail->next = icmp;
+               icmp->prev = tail;
+               icmp->next = 0;
+               break;
+           }
        }
-     }
    }
    Ns_MutexUnlock(&server->icmp.mutex);
 }
 
 // Check host availability by simulating PING
-static int IcmpCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
+static int IcmpCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
    Server *server = (Server*)arg;
    IcmpPort *icmp;
 
-   if (argc < 2) {
-     Tcl_AppendResult(interp, "wrong # args: should be \"",argv[0], " cmd","\"", NULL);
-     return TCL_ERROR;
+   if (objc < 2) {
+       Tcl_WrongNumArgs(interp, 1, objv, "args");
+       return TCL_ERROR;
    }
-   if(!strcmp(argv[1],"sockets")) {
-     Tcl_Obj *list = Tcl_NewListObj(0,0);
-     Ns_MutexLock(&server->icmp.mutex);
-     for(icmp = server->icmp.ports;icmp;icmp = icmp->next) {
-       Tcl_ListObjAppendElement(interp,list,Tcl_NewIntObj(icmp->fd));
-       Tcl_ListObjAppendElement(interp,list,Tcl_NewIntObj(icmp->flag));
-     }
-     Ns_MutexUnlock(&server->icmp.mutex);
-     Tcl_SetObjResult(interp,list);
+   if (!strcmp(Tcl_GetString(objv[1]), "sockets")) {
+       Tcl_Obj *list = Tcl_NewListObj(0, 0);
+       Ns_MutexLock(&server->icmp.mutex);
+       for (icmp = server->icmp.ports;icmp;icmp = icmp->next) {
+           Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj(icmp->fd));
+           Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj(icmp->flag));
+       }
+       Ns_MutexUnlock(&server->icmp.mutex);
+       Tcl_SetObjResult(interp, list);
    }
    return TCL_OK;
 }
 
 // Check host availability by simulating PING
-static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
+static int PingCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
    Server *server = (Server*)arg;
-   if (argc < 2) {
-     Tcl_AppendResult(interp, "wrong # args: should be \"",argv[0], " host","\" ?-timeout n? ?-debug 0|1? ?-count n? ?-size n?", NULL);
-     return TCL_ERROR;
+   if (objc < 2) {
+       Tcl_WrongNumArgs(interp, 1, objv, "host ?-timeout n? ?-debug 0|1? ?-count n? ?-size n?");
+       return TCL_ERROR;
    }
    int i;
    int len;
@@ -1782,6 +1935,7 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **ar
    time_t start_time;
    int size = 56;
    char buf[4096];
+   fd_set fds;
    float delay;
    float rtt_min = 0;
    float rtt_avg = 0;
@@ -1792,185 +1946,216 @@ static int PingCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **ar
    struct sockaddr_in addr;
    struct sockaddr_in addr2;
    struct icmp *icp;
-   fd_set fds;
+   char *host = Tcl_GetString(objv[1]);
 
-   if(Ns_GetSockAddr(&addr,(char*)argv[1],0) != NS_OK) {
-     Tcl_AppendResult(interp,"noHost: unknown host: ",argv[1],0);
-     return TCL_ERROR;
+   if (Ns_GetSockAddr(&addr, host, 0) != NS_OK) {
+       Tcl_AppendResult(interp, "noHost: unknown host: ", host, 0);
+       return TCL_ERROR;
    }
-   for(i = 2;i < argc-1;i = i+2) {
-     if(!strcmp(argv[i],"-timeout")) timeout = atoi(argv[i+1]); else
-     if(!strcmp(argv[i],"-debug")) debug = atoi(argv[i+1]); else
-     if(!strcmp(argv[i],"-count")) count = atoi(argv[i+1]); else
-     if(!strcmp(argv[i],"-size"))
-       if((size = atoi(argv[i+1])) < 56 || size > (int)sizeof(buf)-8) size = 56;
+   for (i = 2;i < objc-1;i = i+2) {
+       if (!strcmp(Tcl_GetString(objv[i]), "-timeout")) {
+           timeout = atoi(Tcl_GetString(objv[i+1]));
+       } else
+       if (!strcmp(Tcl_GetString(objv[i]), "-debug")) {
+           debug = atoi(Tcl_GetString(objv[i+1]));
+       } else
+       if (!strcmp(Tcl_GetString(objv[i]), "-count")) {
+           count = atoi(Tcl_GetString(objv[i+1]));
+       } else
+       if (!strcmp(Tcl_GetString(objv[i]), "-size")) {
+           if ((size = atoi(Tcl_GetString(objv[i+1]))) < 56 || size > (int)sizeof(buf)-8) {
+               size = 56;
+           }
+       }
    }
-   if((fd = IcmpLock(server)) <= 0) {
-     Tcl_AppendResult(interp,"noResources: no more ICMP sockets for ",argv[1],0);
-     return TCL_ERROR;
+   if ((fd = IcmpLock(server)) <= 0) {
+       Tcl_AppendResult(interp, "noResources: no more ICMP sockets for ", host, 0);
+       return TCL_ERROR;
    }
    // Allocate unique id
    Ns_MutexLock(&server->icmp.mutex);
-   if((id = ++server->icmp.id) > 65535) server->icmp.id = id = 1;
+   if ((id = ++server->icmp.id) > 65535) {
+       server->icmp.id = id = 1;
+   }
    Ns_MutexUnlock(&server->icmp.mutex);
    start_time = time(0);
 
-   for(i = 0; i < count;i++) {
-     icp = (struct icmp *)buf;
-     icp->icmp_type = ICMP_ECHO;
-     icp->icmp_code = 0;
-     icp->icmp_cksum = 0;
-     icp->icmp_seq = sent;
-     icp->icmp_id = id;
-     gettimeofday((struct timeval*)&buf[8],0);
-     len = size + 8;
-     icp->icmp_cksum = IcmpChksum((u_short *)icp,len);
+   for (i = 0; i < count;i++) {
+       icp = (struct icmp *)buf;
+       icp->icmp_type = ICMP_ECHO;
+       icp->icmp_code = 0;
+       icp->icmp_cksum = 0;
+       icp->icmp_seq = sent;
+       icp->icmp_id = id;
+       gettimeofday((struct timeval*)&buf[8], 0);
+       len = size + 8;
+       icp->icmp_cksum = IcmpChksum((u_short *)icp, len);
 
-     if(sendto(fd,buf,len,0,(struct sockaddr *)&addr,sizeof(addr)) != len) {
-       Tcl_AppendResult(interp,"noResponse: ",argv[1]," sendto error: ",strerror(errno),0);
-       Ns_Log(Error,"ns_ping: %d/%d: %s: sendto error: %s",id,fd,argv[1],strerror(errno));
-       IcmpUnlock(server,fd);
-       return TCL_ERROR;
-     }
-     sent++;
-     retry_count = 0;
-again:
-     // Check the total time we spent pinging
-     if(time(0) - start_time > timeout) break;
-     FD_ZERO(&fds);
-     FD_SET(fd,&fds);
-     t2.tv_usec = 0;
-     t2.tv_sec = timeout;
-     switch(select(fd+1,&fds,0,0,&t2)) {
-      case 1:
-         if((len = recvfrom(fd,buf,sizeof(buf),0,(struct sockaddr *)&addr2,&slen)) <= 0) {
-           Tcl_AppendResult(interp,"noResponse: ",argv[1]," recvfrom error: ",strerror(errno),0);
-           Ns_Log(Error,"ns_ping: %d/%d: %s: recvfrom error: %s",id,fd,argv[1],strerror(errno));
-           IcmpUnlock(server,fd);
+       if (sendto(fd, buf, len, 0, (struct sockaddr *)&addr, sizeof(addr)) != len) {
+           Tcl_AppendResult(interp, "noResponse: ", host, " sendto error: ", strerror(errno), 0);
+           Ns_Log(Error, "ns_ping: %d/%d: %s: sendto error: %s", id, fd, host, strerror(errno));
+           IcmpUnlock(server, fd);
            return TCL_ERROR;
-         }
-         gettimeofday(&t2,0);
-         if(addr.sin_addr.s_addr != addr2.sin_addr.s_addr) {
-           if(debug) Ns_Log(Debug,"ns_ping: %d/%d: %s: invalid IP %s",id,fd,argv[1],ns_inet_ntoa(addr2.sin_addr));
-           goto again;
-         }
-         break;
-      case -1:
-         if((errno == EINTR || errno == EAGAIN || errno == EINPROGRESS) && ++retry_count < 2) {
-           if(debug) Ns_Log(Debug,"ns_ping: %d/%d: %s: interrupted, %d retry",id,fd,argv[1],retry_count);
-           goto again;
-         }
-      default:
-         if(debug) Ns_Log(Debug,"ns_ping: %d/%d: %s: timeout, %d sent",id,fd,argv[1],sent);
-         continue;
-     }
+       }
+       sent++;
+       retry_count = 0;
+again  :
+       // Check the total time we spent pinging
+       if (time(0) - start_time > timeout) break;
+       FD_ZERO(&fds);
+       FD_SET(fd, &fds);
+       t2.tv_usec = 0;
+       t2.tv_sec = timeout;
+       switch(select(fd+1, &fds, 0, 0, &t2)) {
+        case 1:
+           if ((len = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&addr2, &slen)) <= 0) {
+               Tcl_AppendResult(interp, "noResponse: ", host, " recvfrom error: ", strerror(errno), 0);
+               Ns_Log(Error, "ns_ping: %d/%d: %s: recvfrom error: %s", id, fd, host, strerror(errno));
+               IcmpUnlock(server, fd);
+               return TCL_ERROR;
+           }
+           gettimeofday(&t2, 0);
+           if (addr.sin_addr.s_addr != addr2.sin_addr.s_addr) {
+               if (debug) {
+                   Ns_Log(Debug, "ns_ping: %d/%d: %s: invalid IP %s", id, fd, host, ns_inet_ntoa(addr2.sin_addr));
+               }
+               goto again;
+           }
+           break;
+        case -1:
+           if ((errno == EINTR || errno == EAGAIN || errno == EINPROGRESS) && ++retry_count < 2) {
+               if (debug) {
+                   Ns_Log(Debug, "ns_ping: %d/%d: %s: interrupted,  %d retry", id, fd, host, retry_count);
+               }
+               goto again;
+           }
+        default:
+           if (debug) {
+               Ns_Log(Debug, "ns_ping: %d/%d: %s: timeout,  %d sent", id, fd, host, sent);
+           }
+           continue;
+       }
      // Parse reply header
      ip = (struct ip *) buf;
-     if(len < (hlen = ip->ip_hl << 2) + ICMP_MINLEN) {
-       if(debug) Ns_Log(Debug,"ns_ping: %d/%d: %s: corrupted packet, %d",id,fd,argv[1],len);
-       goto again;
+     if (len < (hlen = ip->ip_hl << 2) + ICMP_MINLEN) {
+         if (debug) {
+             Ns_Log(Debug, "ns_ping: %d/%d: %s: corrupted packet,  %d", id, fd, host, len);
+         }
+         goto again;
      }
      icp = (struct icmp *)(buf + hlen);
      /* Wrong packet */
-     if(icp->icmp_type != ICMP_ECHOREPLY || icp->icmp_id != id) {
-       if(debug) Ns_Log(Debug,"ns_ping: %d/%d: %s: invalid type %d or id %d",id,fd,argv[1],icp->icmp_type,icp->icmp_id);
-       goto again;
+     if (icp->icmp_type != ICMP_ECHOREPLY || icp->icmp_id != id) {
+         if (debug) {
+             Ns_Log(Debug, "ns_ping: %d/%d: %s: invalid type %d or id %d", id, fd, host, icp->icmp_type, icp->icmp_id);
+         }
+         goto again;
      }
      received++;
-     memcpy(&t1,&buf[hlen+8],sizeof(struct timeval));
+     memcpy(&t1, &buf[hlen+8], sizeof(struct timeval));
      delay = (double)(t2.tv_sec-t1.tv_sec)*1000.0+(double)(t2.tv_usec-t1.tv_usec)/1000.0;
-     if(!rtt_min || delay < rtt_min) rtt_min = delay;
-     if(!rtt_max || delay > rtt_max) rtt_max = delay;
+     if (!rtt_min || delay < rtt_min) {
+         rtt_min = delay;
+     }
+     if (!rtt_max || delay > rtt_max) {
+         rtt_max = delay;
+     }
      rtt_avg = (rtt_avg*(received-1)/received)+(delay/received);
    }
-   IcmpUnlock(server,fd);
-   if(!received) {
-     Tcl_AppendResult(interp,"noConnectivity: no reply from ",argv[1],0);
-     return TCL_ERROR;
+   IcmpUnlock(server, fd);
+   if (!received) {
+       Tcl_AppendResult(interp, "noConnectivity: no reply from ", host, 0);
+       return TCL_ERROR;
    }
    // Calculate statistics
    loss = received > 0 ? 100 - ((received*100)/sent) : !sent ? 0 : 100;
 
-   Tcl_Obj *obj = Tcl_NewListObj(0,0);
-   Tcl_ListObjAppendElement(interp,obj,Tcl_NewIntObj(sent));
-   Tcl_ListObjAppendElement(interp,obj,Tcl_NewIntObj(received));
-   Tcl_ListObjAppendElement(interp,obj,Tcl_NewIntObj(loss));
-   Tcl_ListObjAppendElement(interp,obj,Tcl_NewDoubleObj(rtt_min));
-   Tcl_ListObjAppendElement(interp,obj,Tcl_NewDoubleObj(rtt_avg));
-   Tcl_ListObjAppendElement(interp,obj,Tcl_NewDoubleObj(rtt_max));
-   Tcl_SetObjResult(interp,obj);
+   Tcl_Obj *obj = Tcl_NewListObj(0, 0);
+   Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(sent));
+   Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(received));
+   Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(loss));
+   Tcl_ListObjAppendElement(interp, obj, Tcl_NewDoubleObj(rtt_min));
+   Tcl_ListObjAppendElement(interp, obj, Tcl_NewDoubleObj(rtt_avg));
+   Tcl_ListObjAppendElement(interp, obj, Tcl_NewDoubleObj(rtt_max));
+   Tcl_SetObjResult(interp, obj);
 
    return TCL_OK;
 }
 
 // Formatting functions are borrowed from scotty and slightly modified
-static void FormatStringTC(Tcl_Interp *interp,char *bytes,char *fmt)
+static void FormatStringTC(Tcl_Interp *interp, char *bytes, char *fmt)
 {
-    int i = 0, len = strlen(bytes), pfx, have_pfx;
+    int i = 0,  len = strlen(bytes),  pfx,  have_pfx;
     char *last_fmt;
     Ns_DString ds;
 
     Ns_DStringInit(&ds);
 
     while (*fmt && i < len) {
-      last_fmt = fmt;		/* save for loops */
-      have_pfx = pfx = 0;	/* scan prefix: */
-      while(*fmt && isdigit((int) *fmt)) {
-	pfx = pfx * 10 + *fmt - '0', have_pfx = 1, fmt++;
-      }
-      if(!have_pfx) { pfx = 1; }
-      switch (*fmt) {
-       case 'a': {
-	   int n = (pfx < (len-i)) ? pfx : len-i;
-	   Ns_DStringNAppend(&ds,bytes+i,n);
-	   i += n;
-	   break;
+        last_fmt = fmt;		/* save for loops */
+        have_pfx = pfx = 0;	/* scan prefix: */
+        while (*fmt && isdigit((int) *fmt)) {
+            pfx = pfx * 10 + *fmt - '0',  have_pfx = 1,  fmt++;
+        }
+        if (!have_pfx) {
+            pfx = 1;
+        }
+        switch (*fmt) {
+         case 'a': {
+            int n = (pfx < (len-i)) ? pfx : len-i;
+            Ns_DStringNAppend(&ds, bytes+i, n);
+            i += n;
+	    break;
+         }
+        case 'b':
+        case 'd':
+        case 'o':
+        case 'x': {
+            long vv;
+	    for (vv = 0;pfx > 0 && i < len;i++, pfx--) vv = vv * 256 + (bytes[i] & 0xff);
+	    switch (*fmt) {
+	     case 'd':
+	        Ns_DStringPrintf(&ds, "%ld", vv);
+ 	       break;
+             case 'o':
+                Ns_DStringPrintf(&ds, "%lo", vv);
+                break;
+             case 'x':
+                Ns_DStringPrintf(&ds, "%.*lX",  pfx * 2,  vv);
+                break;
+             case 'b': {
+	        int i,  j;
+                 char buf[32];
+	        for (i = (sizeof(int) * 8 - 1); i >= 0 && ! (vv & (1 << i)); i--);
+                for (j = 0; i >= 0; i--,  j++) {
+                    buf[j] = vv & (1 << i) ? '1' : '0';
+                }
+                buf[j] = 0;
+                Ns_DStringAppend(&ds, buf);
+                break;
+             }
+            }
+            break;
+        }
        }
-       case 'b':
-       case 'd':
-       case 'o':
-       case 'x': {
-	   long vv;
-	   for(vv = 0;pfx > 0 && i < len;i++,pfx--) vv = vv * 256 + (bytes[i] & 0xff);
-	   switch (*fmt) {
-	    case 'd':
-	       Ns_DStringPrintf(&ds,"%ld",vv);
-	       break;
-	    case 'o':
-	       Ns_DStringPrintf(&ds,"%lo",vv);
-	       break;
-	    case 'x':
-	       Ns_DStringPrintf(&ds,"%.*lX", pfx * 2, vv);
-	       break;
-	    case 'b': {
-	       int i, j;
-               char buf[32];
-	       for(i = (sizeof(int) * 8 - 1); i >= 0 && ! (vv & (1 << i)); i--);
-	         for (j = 0; i >= 0; i--, j++) {
-	           buf[j] = vv & (1 << i) ? '1' : '0';
-	         }
-	       buf[j] = 0;
-               Ns_DStringAppend(&ds,buf);
-	       break;
-	    }
-	   }
-	   break;
+       fmt++;
+       // Check for a separator and repeat with last format if
+       // data is still available.
+       if (*fmt && !isdigit((int) *fmt) && *fmt != '*') {
+           if (i < len) {
+               Ns_DStringNAppend(&ds, fmt, 1);
+           }
+           fmt++;
        }
-      }
-      fmt++;
-      // Check for a separator and repeat with last format if
-      // data is still available.
-      if(*fmt && !isdigit((int) *fmt) && *fmt != '*') {
-        if(i < len) Ns_DStringNAppend(&ds,fmt,1);
-        fmt++;
-      }
-      if(!*fmt && (i < len)) fmt = last_fmt;
+       if (!*fmt && (i < len)) {
+           fmt = last_fmt;
+       }
     }
-    Tcl_AppendResult(interp,Ns_DStringValue(&ds),0);
+    Tcl_AppendResult(interp, Ns_DStringValue(&ds), 0);
     Ns_DStringFree(&ds);
 }
 
-static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
+static void FormatIntTC(Tcl_Interp *interp, char *bytes, char *fmt)
 {
     char buffer[32];
 
@@ -1978,30 +2163,32 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
      case 'd': {
         int dot = 0;
         float value = atof(bytes);
-	if(fmt[1] == '-' && isdigit((int)fmt[2])) {
-          if((dot = atoi(&fmt[2]))) value = value/(10*dot);
+	if (fmt[1] == '-' && isdigit((int)fmt[2])) {
+            if ((dot = atoi(&fmt[2]))) {
+                value = value/(10*dot);
+            }
         }
-        snprintf(buffer,31,"%.*f",dot,value);
-        Tcl_AppendResult(interp,buffer,0);
+        snprintf(buffer, 31, "%.*f", dot, value);
+        Tcl_AppendResult(interp, buffer, 0);
 	break;
      }
     case 'x': {
-	sprintf(buffer,"%lx",atol(bytes));
-        Tcl_AppendResult(interp,buffer,0);
+	sprintf(buffer, "%lx", atol(bytes));
+        Tcl_AppendResult(interp, buffer, 0);
 	break;
      }
     case 'o': {
-	sprintf(buffer,"%lo",atol(bytes));
-        Tcl_AppendResult(interp,buffer,0);
+	sprintf(buffer, "%lo", atol(bytes));
+        Tcl_AppendResult(interp, buffer, 0);
         break;
      }
     case 'b': {
-        long i, j = 0, value = atol(bytes);
-	if(value < 0) buffer[j++] = '-',value *= -1;
-	for(i = (sizeof(long) * 8 - 1); i > 0 && ! (value & (1 << i)); i--);
-	for(; i >= 0; i--, j++) buffer[j] = value & (1 << i) ? '1' : '0';
+        long i,  j = 0,  value = atol(bytes);
+	if (value < 0) buffer[j++] = '-', value *= -1;
+	for (i = (sizeof(long) * 8 - 1); i > 0 && ! (value & (1 << i)); i--);
+	for (; i >= 0; i--,  j++) buffer[j] = value & (1 << i) ? '1' : '0';
 	buffer[j] = 0;
-	Tcl_AppendResult(interp,buffer,0);
+	Tcl_AppendResult(interp, buffer, 0);
 	break;
      }
     }
@@ -2011,20 +2198,23 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  *
  * This code implements the MD5 message-digest algorithm.
  * The algorithm is due to Ron Rivest.  This code was
- * written by Colin Plumb in 1993, no copyright is claimed.
+ * written by Colin Plumb in 1993,  no copyright is claimed.
  * This code is in the public domain; do with it what you wish.
  *
- * Equivalent code is available from RSA Data Security, Inc.
- * This code has been tested against that, and is equivalent,
+ * Equivalent code is available from RSA Data Security,  Inc.
+ * This code has been tested against that,  and is equivalent, 
  * except that you don't need to include two pages of legalese
  * with every copy.
  *
- * To compute the message digest of a chunk of bytes, declare an
- * MD5Context structure, pass it to MD5Init, call MD5Update as
- * needed on buffers full of bytes, and then call MD5Final, which
+ * To compute the message digest of a chunk of bytes,  declare an
+ * MD5Context structure,  pass it to MD5Init,  call MD5Update as
+ * needed on buffers full of bytes,  and then call MD5Final,  which
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.13  2006/03/18 00:07:24  seryakov
+ * big RADIUS rewrite, server and user support
+ *
  * Revision 1.12  2006/02/10 18:03:25  seryakov
  * ignore hint in ns_mib set when enums are specified
  *
@@ -2053,7 +2243,7 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * compiler warnings silence
  *
  * Revision 1.3  2005/06/09 21:31:30  seryakov
- * rewrote nssnmp's ns_udp using new Objv interface, added to nsudp's ns_udp -retries
+ * rewrote nssnmp's ns_udp using new Objv interface,  added to nsudp's ns_udp -retries
  * parameter.
  *
  * Revision 1.2  2005/06/08 20:03:50  seryakov
@@ -2066,7 +2256,7 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * *** empty log message ***
  *
  * Revision 1.17  2004/10/15 21:53:33  seryakov
- * added ns_udp, ns_snmp trap|inform commands
+ * added ns_udp,  ns_snmp trap|inform commands
  *
  * Revision 1.16  2004/09/29 15:41:37  seryakov
  * nsmibdump added
@@ -2096,7 +2286,7 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  * now builds cleanly on Solaris 2.6
  *
  * Revision 1.1  1998/04/03 19:36:59  aland
- * oh yeah, do MD5 stuff, too
+ * oh yeah,  do MD5 stuff,  too
  *
  * Revision 1.1  1996/12/01 03:06:54  morgan
  * Initial revision
@@ -2106,22 +2296,22 @@ static void FormatIntTC(Tcl_Interp *interp,char *bytes,char *fmt)
  *
  */
 
-static void MD5Transform(unsigned int buf[4], unsigned int const in[16]);
+static void MD5Transform(unsigned int buf[4],  unsigned int const in[16]);
 
 #ifdef sun
 #define HIGHFIRST
 #endif
 
 #ifndef HIGHFIRST
-#define byteReverse(buf, len)	/* Nothing */
+#define byteReverse(buf,  len)	/* Nothing */
 #else
-void byteReverse(unsigned char *buf, unsigned len);
+void byteReverse(unsigned char *buf,  unsigned len);
 
 #ifndef ASM_MD5
 /*
  * Note: this code is harmless on little-endian machines.
  */
-static void byteReverse(unsigned char *buf, unsigned len)
+static void byteReverse(unsigned char *buf,  unsigned len)
 {
     unsigned int t;
     do {
@@ -2151,7 +2341,7 @@ static void MD5Init(struct MD5Context *ctx)
  * Update context to reflect the concatenation of another buffer full
  * of bytes.
  */
-static void MD5Update(struct MD5Context *ctx, unsigned const char *buf, unsigned len)
+static void MD5Update(struct MD5Context *ctx,  unsigned const char *buf,  unsigned len)
 {
     unsigned int t;
 
@@ -2164,33 +2354,33 @@ static void MD5Update(struct MD5Context *ctx, unsigned const char *buf, unsigned
     if (t) {
 	unsigned char *p = (unsigned char *) ctx->in + t;
 	t = 64 - t;
-	if(len < t) {
-	  memcpy(p, buf, len);
+	if (len < t) {
+	  memcpy(p,  buf,  len);
           return;
 	}
-	memcpy(p, buf, t);
-	byteReverse(ctx->in, 16);
-	MD5Transform(ctx->buf, (unsigned int *) ctx->in);
+	memcpy(p,  buf,  t);
+	byteReverse(ctx->in,  16);
+	MD5Transform(ctx->buf,  (unsigned int *) ctx->in);
 	buf += t;
 	len -= t;
     }
     /* Process data in 64-byte chunks */
     while (len >= 64) {
-      memcpy(ctx->in, buf, 64);
-      byteReverse(ctx->in, 16);
-      MD5Transform(ctx->buf, (unsigned int *) ctx->in);
-      buf += 64;
-      len -= 64;
+        memcpy(ctx->in,  buf,  64);
+        byteReverse(ctx->in,  16);
+        MD5Transform(ctx->buf,  (unsigned int *) ctx->in);
+        buf += 64;
+        len -= 64;
     }
     /* Handle any remaining bytes of data. */
-    memcpy(ctx->in, buf, len);
+    memcpy(ctx->in,  buf,  len);
 }
 
 /*
  * Final wrapup - pad to 64-byte boundary with the bit pattern 
- * 1 0* (64-bit count of bits processed, MSB-first)
+ * 1 0* (64-bit count of bits processed,  MSB-first)
  */
-static void MD5Final(unsigned char digest[16], struct MD5Context *ctx)
+static void MD5Final(unsigned char digest[16],  struct MD5Context *ctx)
 {
     unsigned count;
     unsigned char *p;
@@ -2205,121 +2395,121 @@ static void MD5Final(unsigned char digest[16], struct MD5Context *ctx)
     count = 64 - 1 - count;
     /* Pad out to 56 mod 64 */
     if (count < 8) {
-      /* Two lots of padding:  Pad the first block to 64 bytes */
-      memset(p, 0, count);
-      byteReverse(ctx->in, 16);
-      MD5Transform(ctx->buf, (unsigned int *) ctx->in);
-      /* Now fill the next block with 56 bytes */
-      memset(ctx->in, 0, 56);
+        /* Two lots of padding:  Pad the first block to 64 bytes */
+        memset(p,  0,  count);
+        byteReverse(ctx->in,  16);
+        MD5Transform(ctx->buf,  (unsigned int *) ctx->in);
+        /* Now fill the next block with 56 bytes */
+        memset(ctx->in,  0,  56);
     } else {
-      /* Pad block to 56 bytes */
-      memset(p, 0, count - 8);
+        /* Pad block to 56 bytes */
+        memset(p,  0,  count - 8);
     }
-    byteReverse(ctx->in, 14);
+    byteReverse(ctx->in,  14);
     /* Append length in bits and transform */
     ((unsigned int *) ctx->in)[14] = ctx->bits[0];
     ((unsigned int *) ctx->in)[15] = ctx->bits[1];
-    MD5Transform(ctx->buf, (unsigned int *) ctx->in);
-    byteReverse((unsigned char *) ctx->buf, 4);
-    memcpy(digest, ctx->buf, 16);
-    memset(ctx, 0, sizeof(ctx));	/* In case it's sensitive */
+    MD5Transform(ctx->buf,  (unsigned int *) ctx->in);
+    byteReverse((unsigned char *) ctx->buf,  4);
+    memcpy(digest,  ctx->buf,  16);
+    memset(ctx,  0,  sizeof(ctx));	/* In case it's sensitive */
 }
 
 #ifndef ASM_MD5
 
 /* The four core functions - F1 is optimized somewhat */
 
-/* #define F1(x, y, z) (x & y | ~x & z) */
-#define F1(x, y, z) (z ^ (x & (y ^ z)))
-#define F2(x, y, z) F1(z, x, y)
-#define F3(x, y, z) (x ^ y ^ z)
-#define F4(x, y, z) (y ^ (x | ~z))
+/* #define F1(x,  y,  z) (x & y | ~x & z) */
+#define F1(x,  y,  z) (z ^ (x & (y ^ z)))
+#define F2(x,  y,  z) F1(z,  x,  y)
+#define F3(x,  y,  z) (x ^ y ^ z)
+#define F4(x,  y,  z) (y ^ (x | ~z))
 
 /* This is the central step in the MD5 algorithm. */
-#define MD5STEP(f, w, x, y, z, data, s) \
-	( w += f(x, y, z) + data,  w = w<<s | w>>(32-s),  w += x )
+#define MD5STEP(f,  w,  x,  y,  z,  data,  s) \
+	( w += f(x,  y,  z) + data,   w = w<<s | w>>(32-s),   w += x )
 
 /*
- * The core of the MD5 algorithm, this alters an existing MD5 hash to
+ * The core of the MD5 algorithm,  this alters an existing MD5 hash to
  * reflect the addition of 16 longwords of new data.  MD5Update blocks
  * the data and converts bytes into longwords for this routine.
  */
-static void MD5Transform(unsigned int buf[4], unsigned int const in[16])
+static void MD5Transform(unsigned int buf[4],  unsigned int const in[16])
 {
-    register unsigned int a, b, c, d;
+    register unsigned int a,  b,  c,  d;
 
     a = buf[0];
     b = buf[1];
     c = buf[2];
     d = buf[3];
 
-    MD5STEP(F1, a, b, c, d,  in[0] + 0xd76aa478U,  7);
-    MD5STEP(F1, d, a, b, c,  in[1] + 0xe8c7b756U, 12);
-    MD5STEP(F1, c, d, a, b,  in[2] + 0x242070dbU, 17);
-    MD5STEP(F1, b, c, d, a,  in[3] + 0xc1bdceeeU, 22);
-    MD5STEP(F1, a, b, c, d,  in[4] + 0xf57c0fafU,  7);
-    MD5STEP(F1, d, a, b, c,  in[5] + 0x4787c62aU, 12);
-    MD5STEP(F1, c, d, a, b,  in[6] + 0xa8304613U, 17);
-    MD5STEP(F1, b, c, d, a,  in[7] + 0xfd469501U, 22);
-    MD5STEP(F1, a, b, c, d,  in[8] + 0x698098d8U,  7);
-    MD5STEP(F1, d, a, b, c,  in[9] + 0x8b44f7afU, 12);
-    MD5STEP(F1, c, d, a, b, in[10] + 0xffff5bb1U, 17);
-    MD5STEP(F1, b, c, d, a, in[11] + 0x895cd7beU, 22);
-    MD5STEP(F1, a, b, c, d, in[12] + 0x6b901122U,  7);
-    MD5STEP(F1, d, a, b, c, in[13] + 0xfd987193U, 12);
-    MD5STEP(F1, c, d, a, b, in[14] + 0xa679438eU, 17);
-    MD5STEP(F1, b, c, d, a, in[15] + 0x49b40821U, 22);
+    MD5STEP(F1,  a,  b,  c,  d,   in[0] + 0xd76aa478U,   7);
+    MD5STEP(F1,  d,  a,  b,  c,   in[1] + 0xe8c7b756U,  12);
+    MD5STEP(F1,  c,  d,  a,  b,   in[2] + 0x242070dbU,  17);
+    MD5STEP(F1,  b,  c,  d,  a,   in[3] + 0xc1bdceeeU,  22);
+    MD5STEP(F1,  a,  b,  c,  d,   in[4] + 0xf57c0fafU,   7);
+    MD5STEP(F1,  d,  a,  b,  c,   in[5] + 0x4787c62aU,  12);
+    MD5STEP(F1,  c,  d,  a,  b,   in[6] + 0xa8304613U,  17);
+    MD5STEP(F1,  b,  c,  d,  a,   in[7] + 0xfd469501U,  22);
+    MD5STEP(F1,  a,  b,  c,  d,   in[8] + 0x698098d8U,   7);
+    MD5STEP(F1,  d,  a,  b,  c,   in[9] + 0x8b44f7afU,  12);
+    MD5STEP(F1,  c,  d,  a,  b,  in[10] + 0xffff5bb1U,  17);
+    MD5STEP(F1,  b,  c,  d,  a,  in[11] + 0x895cd7beU,  22);
+    MD5STEP(F1,  a,  b,  c,  d,  in[12] + 0x6b901122U,   7);
+    MD5STEP(F1,  d,  a,  b,  c,  in[13] + 0xfd987193U,  12);
+    MD5STEP(F1,  c,  d,  a,  b,  in[14] + 0xa679438eU,  17);
+    MD5STEP(F1,  b,  c,  d,  a,  in[15] + 0x49b40821U,  22);
 
-    MD5STEP(F2, a, b, c, d,  in[1] + 0xf61e2562U,  5);
-    MD5STEP(F2, d, a, b, c,  in[6] + 0xc040b340U,  9);
-    MD5STEP(F2, c, d, a, b, in[11] + 0x265e5a51U, 14);
-    MD5STEP(F2, b, c, d, a,  in[0] + 0xe9b6c7aaU, 20);
-    MD5STEP(F2, a, b, c, d,  in[5] + 0xd62f105dU,  5);
-    MD5STEP(F2, d, a, b, c, in[10] + 0x02441453U,  9);
-    MD5STEP(F2, c, d, a, b, in[15] + 0xd8a1e681U, 14);
-    MD5STEP(F2, b, c, d, a,  in[4] + 0xe7d3fbc8U, 20);
-    MD5STEP(F2, a, b, c, d,  in[9] + 0x21e1cde6U,  5);
-    MD5STEP(F2, d, a, b, c, in[14] + 0xc33707d6U,  9);
-    MD5STEP(F2, c, d, a, b,  in[3] + 0xf4d50d87U, 14);
-    MD5STEP(F2, b, c, d, a,  in[8] + 0x455a14edU, 20);
-    MD5STEP(F2, a, b, c, d, in[13] + 0xa9e3e905U,  5);
-    MD5STEP(F2, d, a, b, c,  in[2] + 0xfcefa3f8U,  9);
-    MD5STEP(F2, c, d, a, b,  in[7] + 0x676f02d9U, 14);
-    MD5STEP(F2, b, c, d, a, in[12] + 0x8d2a4c8aU, 20);
+    MD5STEP(F2,  a,  b,  c,  d,   in[1] + 0xf61e2562U,   5);
+    MD5STEP(F2,  d,  a,  b,  c,   in[6] + 0xc040b340U,   9);
+    MD5STEP(F2,  c,  d,  a,  b,  in[11] + 0x265e5a51U,  14);
+    MD5STEP(F2,  b,  c,  d,  a,   in[0] + 0xe9b6c7aaU,  20);
+    MD5STEP(F2,  a,  b,  c,  d,   in[5] + 0xd62f105dU,   5);
+    MD5STEP(F2,  d,  a,  b,  c,  in[10] + 0x02441453U,   9);
+    MD5STEP(F2,  c,  d,  a,  b,  in[15] + 0xd8a1e681U,  14);
+    MD5STEP(F2,  b,  c,  d,  a,   in[4] + 0xe7d3fbc8U,  20);
+    MD5STEP(F2,  a,  b,  c,  d,   in[9] + 0x21e1cde6U,   5);
+    MD5STEP(F2,  d,  a,  b,  c,  in[14] + 0xc33707d6U,   9);
+    MD5STEP(F2,  c,  d,  a,  b,   in[3] + 0xf4d50d87U,  14);
+    MD5STEP(F2,  b,  c,  d,  a,   in[8] + 0x455a14edU,  20);
+    MD5STEP(F2,  a,  b,  c,  d,  in[13] + 0xa9e3e905U,   5);
+    MD5STEP(F2,  d,  a,  b,  c,   in[2] + 0xfcefa3f8U,   9);
+    MD5STEP(F2,  c,  d,  a,  b,   in[7] + 0x676f02d9U,  14);
+    MD5STEP(F2,  b,  c,  d,  a,  in[12] + 0x8d2a4c8aU,  20);
 
-    MD5STEP(F3, a, b, c, d,  in[5] + 0xfffa3942U,  4);
-    MD5STEP(F3, d, a, b, c,  in[8] + 0x8771f681U, 11);
-    MD5STEP(F3, c, d, a, b, in[11] + 0x6d9d6122U, 16);
-    MD5STEP(F3, b, c, d, a, in[14] + 0xfde5380cU, 23);
-    MD5STEP(F3, a, b, c, d,  in[1] + 0xa4beea44U,  4);
-    MD5STEP(F3, d, a, b, c,  in[4] + 0x4bdecfa9U, 11);
-    MD5STEP(F3, c, d, a, b,  in[7] + 0xf6bb4b60U, 16);
-    MD5STEP(F3, b, c, d, a, in[10] + 0xbebfbc70U, 23);
-    MD5STEP(F3, a, b, c, d, in[13] + 0x289b7ec6U,  4);
-    MD5STEP(F3, d, a, b, c,  in[0] + 0xeaa127faU, 11);
-    MD5STEP(F3, c, d, a, b,  in[3] + 0xd4ef3085U, 16);
-    MD5STEP(F3, b, c, d, a,  in[6] + 0x04881d05U, 23);
-    MD5STEP(F3, a, b, c, d,  in[9] + 0xd9d4d039U,  4);
-    MD5STEP(F3, d, a, b, c, in[12] + 0xe6db99e5U, 11);
-    MD5STEP(F3, c, d, a, b, in[15] + 0x1fa27cf8U, 16);
-    MD5STEP(F3, b, c, d, a,  in[2] + 0xc4ac5665U, 23);
+    MD5STEP(F3,  a,  b,  c,  d,   in[5] + 0xfffa3942U,   4);
+    MD5STEP(F3,  d,  a,  b,  c,   in[8] + 0x8771f681U,  11);
+    MD5STEP(F3,  c,  d,  a,  b,  in[11] + 0x6d9d6122U,  16);
+    MD5STEP(F3,  b,  c,  d,  a,  in[14] + 0xfde5380cU,  23);
+    MD5STEP(F3,  a,  b,  c,  d,   in[1] + 0xa4beea44U,   4);
+    MD5STEP(F3,  d,  a,  b,  c,   in[4] + 0x4bdecfa9U,  11);
+    MD5STEP(F3,  c,  d,  a,  b,   in[7] + 0xf6bb4b60U,  16);
+    MD5STEP(F3,  b,  c,  d,  a,  in[10] + 0xbebfbc70U,  23);
+    MD5STEP(F3,  a,  b,  c,  d,  in[13] + 0x289b7ec6U,   4);
+    MD5STEP(F3,  d,  a,  b,  c,   in[0] + 0xeaa127faU,  11);
+    MD5STEP(F3,  c,  d,  a,  b,   in[3] + 0xd4ef3085U,  16);
+    MD5STEP(F3,  b,  c,  d,  a,   in[6] + 0x04881d05U,  23);
+    MD5STEP(F3,  a,  b,  c,  d,   in[9] + 0xd9d4d039U,   4);
+    MD5STEP(F3,  d,  a,  b,  c,  in[12] + 0xe6db99e5U,  11);
+    MD5STEP(F3,  c,  d,  a,  b,  in[15] + 0x1fa27cf8U,  16);
+    MD5STEP(F3,  b,  c,  d,  a,   in[2] + 0xc4ac5665U,  23);
 
-    MD5STEP(F4, a, b, c, d,  in[0] + 0xf4292244U,  6);
-    MD5STEP(F4, d, a, b, c,  in[7] + 0x432aff97U, 10);
-    MD5STEP(F4, c, d, a, b, in[14] + 0xab9423a7U, 15);
-    MD5STEP(F4, b, c, d, a,  in[5] + 0xfc93a039U, 21);
-    MD5STEP(F4, a, b, c, d, in[12] + 0x655b59c3U,  6);
-    MD5STEP(F4, d, a, b, c,  in[3] + 0x8f0ccc92U, 10);
-    MD5STEP(F4, c, d, a, b, in[10] + 0xffeff47dU, 15);
-    MD5STEP(F4, b, c, d, a,  in[1] + 0x85845dd1U, 21);
-    MD5STEP(F4, a, b, c, d,  in[8] + 0x6fa87e4fU,  6);
-    MD5STEP(F4, d, a, b, c, in[15] + 0xfe2ce6e0U, 10);
-    MD5STEP(F4, c, d, a, b,  in[6] + 0xa3014314U, 15);
-    MD5STEP(F4, b, c, d, a, in[13] + 0x4e0811a1U, 21);
-    MD5STEP(F4, a, b, c, d,  in[4] + 0xf7537e82U,  6);
-    MD5STEP(F4, d, a, b, c, in[11] + 0xbd3af235U, 10);
-    MD5STEP(F4, c, d, a, b,  in[2] + 0x2ad7d2bbU, 15);
-    MD5STEP(F4, b, c, d, a,  in[9] + 0xeb86d391U, 21);
+    MD5STEP(F4,  a,  b,  c,  d,   in[0] + 0xf4292244U,   6);
+    MD5STEP(F4,  d,  a,  b,  c,   in[7] + 0x432aff97U,  10);
+    MD5STEP(F4,  c,  d,  a,  b,  in[14] + 0xab9423a7U,  15);
+    MD5STEP(F4,  b,  c,  d,  a,   in[5] + 0xfc93a039U,  21);
+    MD5STEP(F4,  a,  b,  c,  d,  in[12] + 0x655b59c3U,   6);
+    MD5STEP(F4,  d,  a,  b,  c,   in[3] + 0x8f0ccc92U,  10);
+    MD5STEP(F4,  c,  d,  a,  b,  in[10] + 0xffeff47dU,  15);
+    MD5STEP(F4,  b,  c,  d,  a,   in[1] + 0x85845dd1U,  21);
+    MD5STEP(F4,  a,  b,  c,  d,   in[8] + 0x6fa87e4fU,   6);
+    MD5STEP(F4,  d,  a,  b,  c,  in[15] + 0xfe2ce6e0U,  10);
+    MD5STEP(F4,  c,  d,  a,  b,   in[6] + 0xa3014314U,  15);
+    MD5STEP(F4,  b,  c,  d,  a,  in[13] + 0x4e0811a1U,  21);
+    MD5STEP(F4,  a,  b,  c,  d,   in[4] + 0xf7537e82U,   6);
+    MD5STEP(F4,  d,  a,  b,  c,  in[11] + 0xbd3af235U,  10);
+    MD5STEP(F4,  c,  d,  a,  b,   in[2] + 0x2ad7d2bbU,  15);
+    MD5STEP(F4,  b,  c,  d,  a,   in[9] + 0xeb86d391U,  21);
 
     buf[0] += a;
     buf[1] += b;
@@ -2329,74 +2519,77 @@ static void MD5Transform(unsigned int buf[4], unsigned int const in[16])
 
 #endif
 
-static void MD5Calc(unsigned char *output, unsigned char *input, unsigned int inlen)
+static void MD5Calc(unsigned char *output,  unsigned char *input,  unsigned int inlen)
 {
     MD5_CTX context;
 
     MD5Init(&context);
-    MD5Update(&context, input, inlen);
-    MD5Final(output, &context);
+    MD5Update(&context,  input,  inlen);
+    MD5Final(output,  &context);
 }
 
-static RadiusDict *RadiusDictFind(int attr,int vendor,int unlink)
-{
-    RadiusDict *dict = 0;
-
-    Ns_MutexLock(&radiusDictMutex);
-    for(dict = radiusDictList;dict;dict = dict->next)
-      if(dict->vendor == vendor && dict->attribute == attr) break;
-    if(unlink && dict) {
-      if(dict->prev) dict->prev->next = dict->next;
-      if(dict->next) dict->next->prev = dict->prev;
-      if(dict == radiusDictList) radiusDictList = dict->next;
-      dict->next = dict->prev = 0;
-    }
-    Ns_MutexUnlock(&radiusDictMutex);
-    return dict;
-}
-
-static RadiusDict *RadiusDictFindName(char *name,int vendor,int unlink)
-{
-    RadiusDict *dict = 0;
-
-    Ns_MutexLock(&radiusDictMutex);
-    for(dict = radiusDictList;dict;dict = dict->next)
-      if(dict->vendor == vendor && !strcasecmp(dict->name,name)) break;
-    if(unlink && dict) {
-      if(dict->prev) dict->prev->next = dict->next;
-      if(dict->next) dict->next->prev = dict->prev;
-      if(dict == radiusDictList) radiusDictList = dict->next;
-      dict->next = dict->prev = 0;
-    }
-    Ns_MutexUnlock(&radiusDictMutex);
-    return dict;
-}
-
-static void RadiusDictPrintf(Ns_DString *ds)
+static RadiusDict *RadiusDictFind(Server *server, char *name, int attr, int vendor, int unlink)
 {
     RadiusDict *dict;
 
-    Ns_MutexLock(&radiusDictMutex);
-    for(dict = radiusDictList;dict;dict = dict->next)
-      Ns_DStringPrintf(ds,"%s %d %d %d ",dict->name,dict->attribute,dict->vendor,dict->type);
-    Ns_MutexUnlock(&radiusDictMutex);
+    if (attr == -1 && name) {
+        attr = atoi(name);
+    }
+    Ns_MutexLock(&server->radius.dictMutex);
+    for (dict = server->radius.dictList; dict; dict = dict->next) {
+        if (vendor == -1 || dict->vendor == vendor) {
+            if (dict->attribute == attr || (name && !strcasecmp(dict->name, name))) {
+                break;
+            }
+        }
+    }
+    if (unlink && dict) {
+        if (dict->prev) {
+            dict->prev->next = dict->next;
+        }
+        if (dict->next) {
+            dict->next->prev = dict->prev;
+        }
+        if (dict == server->radius.dictList) {
+            server->radius.dictList = dict->next;
+        }
+        dict->next = dict->prev = 0;
+    }
+    Ns_MutexUnlock(&server->radius.dictMutex);
+    return dict;
 }
 
-static void RadiusDictAdd(char *name,int attr,int vendor,int type)
+static RadiusDict *RadiusDictAdd(Server *server, char *name, int attr, int vendor, int type)
+{
+    RadiusDict *dict = 0;
+
+    if (attr && name) {
+        dict = (RadiusDict*)ns_calloc(1, sizeof(RadiusDict));
+        dict->type = type;
+        dict->vendor = vendor;
+        dict->attribute = attr;
+        strncpy(dict->name, name, RADIUS_STRING_LEN);
+        Ns_StrToLower(dict->name);
+        Ns_MutexLock(&server->radius.dictMutex);
+        dict->next = server->radius.dictList;
+        if (dict->next) {
+            dict->next->prev = dict;
+        }
+        server->radius.dictList = dict;
+        Ns_MutexUnlock(&server->radius.dictMutex);
+    }
+    return dict;
+}
+
+static void RadiusDictPrintf(Server *server, Ns_DString *ds)
 {
     RadiusDict *dict;
 
-    if(!attr || !name) return;
-    dict = (RadiusDict*)ns_calloc(1,sizeof(RadiusDict));
-    dict->type = type;
-    dict->vendor = vendor;
-    dict->attribute = attr;
-    strncpy(dict->name,name,RADIUS_STRING_LEN);
-    Ns_MutexLock(&radiusDictMutex);
-    dict->next = radiusDictList;
-    if(dict->next) dict->next->prev = dict;
-    radiusDictList = dict;
-    Ns_MutexUnlock(&radiusDictMutex);
+    Ns_MutexLock(&server->radius.dictMutex);
+    for (dict = server->radius.dictList; dict; dict = dict->next) {
+        Ns_DStringPrintf(ds, "%s %d %d %d ", dict->name, dict->attribute, dict->vendor, dict->type);
+    }
+    Ns_MutexUnlock(&server->radius.dictMutex);
 }
 
 // generate a random vector
@@ -2408,121 +2601,125 @@ static void RadiusVectorCreate(RadiusVector vector)
 
     // Use the time of day with the best resolution the system can
     // give us -- often close to microsecond accuracy.
-    gettimeofday(&tv,&tz);
+    gettimeofday(&tv, &tz);
     tv.tv_sec ^= getpid() * (int)pthread_self(); /* add some secret information */
     // Hash things to get some cryptographically strong pseudo-random numbers
     MD5Init(&md5);
-    MD5Update(&md5,(unsigned char *)&tv,sizeof(tv));
-    MD5Update(&md5,(unsigned char *)&tz,sizeof(tz));
-    MD5Final(vector,&md5);
+    MD5Update(&md5, (unsigned char *)&tv, sizeof(tv));
+    MD5Update(&md5, (unsigned char *)&tz, sizeof(tz));
+    MD5Final(vector, &md5);
 }
 
 // MD5(packet header + packet data + secret)
-static int RadiusVectorVerify(RadiusHeader *hdr,RadiusVector vector,char *secret)
+static int RadiusVectorVerify(RadiusHeader *hdr, RadiusVector vector, char *secret)
 {
     MD5_CTX md5;
-    RadiusVector digest,reply;
+    RadiusVector digest, reply;
 
-    memcpy(reply,hdr->vector,RADIUS_VECTOR_LEN);
-    memcpy(hdr->vector,vector,RADIUS_VECTOR_LEN);
+    memcpy(reply, hdr->vector, RADIUS_VECTOR_LEN);
+    memcpy(hdr->vector, vector, RADIUS_VECTOR_LEN);
     MD5Init(&md5);
-    MD5Update(&md5,(unsigned char *)hdr,ntohs(hdr->length));
-    MD5Update(&md5,(unsigned char *)secret,strlen(secret));
-    MD5Final(digest,&md5);
-    return memcmp(digest,reply,RADIUS_VECTOR_LEN);
+    MD5Update(&md5, (unsigned char *)hdr, ntohs(hdr->length));
+    MD5Update(&md5, (unsigned char *)secret, strlen(secret));
+    MD5Final(digest, &md5);
+    return memcmp(digest, reply, RADIUS_VECTOR_LEN);
 }
 
-static void RadiusPasswdDecrypt(RadiusAttr *attr,RadiusVector vector,char *secret,char *salt,int saltlen)
+static void RadiusPasswdDecrypt(RadiusAttr *attr, RadiusVector vector, char *secret, char *salt, int saltlen)
 {
     RadiusVector digest;
     unsigned char *p = vector;
     unsigned char pw[RADIUS_STRING_LEN+1];
     unsigned char md5[RADIUS_STRING_LEN+1];
-    unsigned int i,j,secretlen = strlen(secret);
+    unsigned int i, j, secretlen = strlen(secret);
 
-    memset(pw,0,RADIUS_STRING_LEN+1);
-    memcpy(pw,attr->sval,attr->lval);
-    memcpy(md5,secret,secretlen);
-    for(i = 0;i < attr->lval;) {
-      memcpy(&md5[secretlen],p,RADIUS_VECTOR_LEN);
-      if(!i && saltlen) {
-        memcpy(&md5[secretlen + RADIUS_VECTOR_LEN],salt,saltlen);
-        MD5Calc(digest,md5,secretlen + RADIUS_VECTOR_LEN + saltlen);
-      } else
-        MD5Calc(digest,md5,secretlen + RADIUS_VECTOR_LEN);
-      p = &attr->sval[i];
-      for(j = 0;j < RADIUS_VECTOR_LEN;j++,i++) pw[i] ^= digest[j];
+    memset(pw, 0, RADIUS_STRING_LEN+1);
+    memcpy(pw, attr->sval, attr->lval);
+    memcpy(md5, secret, secretlen);
+    for (i = 0;i < attr->lval;) {
+        memcpy(&md5[secretlen], p, RADIUS_VECTOR_LEN);
+        if (!i && saltlen) {
+            memcpy(&md5[secretlen + RADIUS_VECTOR_LEN], salt, saltlen);
+            MD5Calc(digest, md5, secretlen + RADIUS_VECTOR_LEN + saltlen);
+        } else {
+            MD5Calc(digest, md5, secretlen + RADIUS_VECTOR_LEN);
+        }
+        p = &attr->sval[i];
+        for (j = 0;j < RADIUS_VECTOR_LEN;j++, i++) pw[i] ^= digest[j];
     }
     attr->lval = strlen((char*)pw);
-    memcpy(attr->sval,pw,RADIUS_STRING_LEN);
+    memcpy(attr->sval, pw, RADIUS_STRING_LEN);
 }
 
-static void RadiusPasswdEncrypt(RadiusAttr *attr,RadiusVector vector,char *secret,char *salt,int saltlen)
+static void RadiusPasswdEncrypt(RadiusAttr *attr, RadiusVector vector, char *secret, char *salt, int saltlen)
 {
     RadiusVector digest;
     unsigned int chunks;
     unsigned char *p = vector;
     unsigned char pw[RADIUS_STRING_LEN+1];
     unsigned char md5[RADIUS_STRING_LEN+1];
-    unsigned int i,j,secretlen = strlen(secret);
+    unsigned int i, j, secretlen = strlen(secret);
 
-    memset(pw,0,RADIUS_STRING_LEN+1);
-    memcpy(pw,attr->sval,attr->lval);
-    memcpy(md5,secret,secretlen);
+    memset(pw, 0, RADIUS_STRING_LEN+1);
+    memcpy(pw, attr->sval, attr->lval);
+    memcpy(md5, secret, secretlen);
     chunks = (attr->lval + RADIUS_VECTOR_LEN - 1) / RADIUS_VECTOR_LEN;
-    for(i = 0;i < chunks * RADIUS_VECTOR_LEN; ) {
-      memcpy(&md5[secretlen],p,RADIUS_VECTOR_LEN);
-      if(i == 0 && saltlen) {
-        memcpy(&md5[secretlen + RADIUS_VECTOR_LEN],salt,saltlen);
-        MD5Calc(digest,md5, secretlen + RADIUS_VECTOR_LEN + saltlen);
-      } else
-        MD5Calc(digest,md5,secretlen + RADIUS_VECTOR_LEN);
-      p = &pw[i];
-      for (j = 0; j < RADIUS_VECTOR_LEN; j++, i++) pw[i] ^= digest[j];
+    for (i = 0;i < chunks * RADIUS_VECTOR_LEN; ) {
+        memcpy(&md5[secretlen], p, RADIUS_VECTOR_LEN);
+        if (i == 0 && saltlen) {
+            memcpy(&md5[secretlen + RADIUS_VECTOR_LEN], salt, saltlen);
+            MD5Calc(digest, md5,  secretlen + RADIUS_VECTOR_LEN + saltlen);
+        } else {
+            MD5Calc(digest, md5, secretlen + RADIUS_VECTOR_LEN);
+        }
+        p = &pw[i];
+        for (j = 0; j < RADIUS_VECTOR_LEN; j++,  i++) pw[i] ^= digest[j];
     }
     attr->lval = chunks * RADIUS_VECTOR_LEN;
-    memcpy(attr->sval,pw,RADIUS_STRING_LEN);
+    memcpy(attr->sval, pw, RADIUS_STRING_LEN);
 }
 
-static RadiusAttr *RadiusAttrCreate(char *name,int attr,int vendor,unsigned char *val,int len)
+static RadiusAttr *RadiusAttrCreate(Server *server, char *name, int attr, int vendor, char *val, int len)
 {
     RadiusAttr *vp;
     RadiusDict *dict = 0;
 
-    if(attr) dict = RadiusDictFind(attr,vendor,0); else
-    if(name) dict = RadiusDictFindName(name,vendor,0);
-    if(!dict && !attr) {
-      Ns_Log(Error,"RadiusAttrCreate: unknown attr: %s %d %d",name,attr,vendor);
-      return 0;
+    dict = RadiusDictFind(server, name, attr, vendor, 0);
+    if (!dict && attr <= 0) {
+        Ns_Log(Error, "RadiusAttrCreate: unknown attr: %s %d %d", name, attr, vendor);
+        return 0;
     }
-    vp = (RadiusAttr*)ns_calloc(1,sizeof(RadiusAttr));
+    vp = (RadiusAttr*)ns_calloc(1, sizeof(RadiusAttr));
     vp->vendor = vendor;
     vp->attribute = attr;
-    if(dict) {
-      vp->type = dict->type;
-      vp->attribute = dict->attribute;
-      strcpy(vp->name,dict->name);
+    if (dict) {
+        vp->type = dict->type;
+        vp->attribute = dict->attribute;
+        strcpy(vp->name, dict->name);
     } else {
-      sprintf(vp->name,"A%d-V%d",attr,vendor);
-      vp->type = RADIUS_TYPE_STRING;
+        sprintf(vp->name, "A%d-V%d", attr, vendor);
+        vp->type = RADIUS_TYPE_STRING;
     }
     switch(vp->type) {
      case RADIUS_TYPE_STRING:
      case RADIUS_TYPE_FILTER_BINARY:
-         if(len <= 0) len = strlen((const char*)val);
+         if (len <= 0) {
+             len = strlen((const char*)val);
+         }
          vp->lval = len < RADIUS_STRING_LEN ? len : RADIUS_STRING_LEN;
-         memcpy(vp->sval,val,vp->lval);
+         memcpy(vp->sval, val, vp->lval);
          break;
      case RADIUS_TYPE_DATE:
      case RADIUS_TYPE_INTEGER:
      case RADIUS_TYPE_IPADDR:
-         if(len > 0)
+         if (len > 0) {
            vp->lval = ntohl(*(unsigned long *)val);
-         else
-         if(len < 0)
+         } else
+         if (len < 0) {
            vp->lval = atol((const char*)val);
-         else
-           memcpy(&vp->lval,val,sizeof(vp->lval));
+         } else {
+           memcpy(&vp->lval, val, sizeof(vp->lval));
+         }
          break;
      default:
          ns_free(vp);
@@ -2531,136 +2728,158 @@ static RadiusAttr *RadiusAttrCreate(char *name,int attr,int vendor,unsigned char
     return vp;
 }
 
-static void RadiusAttrPrintf(RadiusAttr *vp,Ns_DString *ds,int printname,int printall)
+static void RadiusAttrPrintf(RadiusAttr *vp, Ns_DString *ds, int printname, int printall)
 {
     unsigned i;
     RadiusAttr *attr;
 
-    for(attr = vp;attr;attr = attr->next) {
-      if(attr != vp) Ns_DStringAppend(ds," ");
-      if(printname) Ns_DStringPrintf(ds,"%s ",attr->name);
-      switch(attr->type) {
-       case RADIUS_TYPE_DATE:
-          char buf[64];
-          strftime(buf,sizeof(buf),"%Y-%m-%d %T",ns_localtime((const time_t*)&attr->lval));
-          Ns_DStringPrintf(ds,"%s%s%s",printname?"{":"",buf,printname?"}":"");
-          break;
-       case RADIUS_TYPE_INTEGER:
-          Ns_DStringPrintf(ds,"%d",attr->lval);
-          break;
-       case RADIUS_TYPE_IPADDR:
-          Ns_DStringPrintf(ds,"%s ",ns_inet_ntoa(*((struct in_addr*)&attr->lval)));
-          break;
-       case RADIUS_TYPE_STRING:
-       case RADIUS_TYPE_FILTER_BINARY:
-          for(i = 0;i < attr->lval;i++) if(!isprint((int)attr->sval[i])) break;
-          if(i == attr->lval) {
-            Ns_DStringPrintf(ds,"%s%s%s",printname?"{":"",attr->sval,printname?"}":"");
+    for (attr = vp; attr; attr = attr->next) {
+        if (attr != vp) {
+            Ns_DStringAppend(ds, " ");
+        }
+        if (printname) {
+            Ns_DStringPrintf(ds, "%s ", attr->name);
+        }
+        switch(attr->type) {
+         case RADIUS_TYPE_DATE:
+            char buf[64];
+            strftime(buf, sizeof(buf), "%Y-%m-%d %T", ns_localtime((const time_t*)&attr->lval));
+            Ns_DStringPrintf(ds, "%s%s%s", printall?"{":"", buf, printall?"}":"");
             break;
-          }
-       default:
-          for(i = 0;i < attr->lval;i++) Ns_DStringPrintf(ds,"%2.2X",attr->sval[i]);
+         case RADIUS_TYPE_INTEGER:
+            Ns_DStringPrintf(ds, "%d", attr->lval);
+            break;
+         case RADIUS_TYPE_IPADDR:
+            Ns_DStringPrintf(ds, "%s ", ns_inet_ntoa(*((struct in_addr*)&attr->lval)));
+            break;
+         case RADIUS_TYPE_STRING:
+         case RADIUS_TYPE_FILTER_BINARY:
+            for (i = 0;i < attr->lval;i++) {
+                 if (!isprint((int)attr->sval[i])) {
+                     break;
+                 }
+            }
+            if (i == attr->lval) {
+                Ns_DStringPrintf(ds, "%s%s%s", printname?"{":"", attr->sval, printname?"}":"");
+                break;
+            }
+         default:
+            for (i = 0;i < attr->lval;i++) {
+                Ns_DStringPrintf(ds, "%2.2X", attr->sval[i]);
+            }
+        }
+        if (!printall) {
+            break;
+        }
       }
-      if(!printall) break;
-    }
 }
 
-static void RadiusAttrLink(RadiusAttr **list,RadiusAttr *vp)
+static void RadiusAttrLink(RadiusAttr **list, RadiusAttr *vp)
 {
-    for(;*list;list = &(*list)->next);
+    for (;*list; list = &(*list)->next);
     *list = vp;
 }
 
-static RadiusAttr *RadiusAttrFind(RadiusAttr *vp,int attr,int vendor)
+static RadiusAttr *RadiusAttrFind(RadiusAttr *vp, char *name, int attr, int vendor)
 {
-    for(;vp;vp = vp->next)
-      if(vp->vendor == vendor && vp->attribute == attr) return vp;
-    return 0;
-}
-
-static RadiusAttr *RadiusAttrFindName(RadiusAttr *vp,char *name,int vendor)
-{
-    for(;vp;vp = vp->next)
-      if(vp->vendor == vendor && !strcasecmp(vp->name,name)) return vp;
+    for (;vp; vp = vp->next) {
+        if (vendor == -1 || vp->vendor == vendor) {
+            if (vp->attribute == attr || (name && !strcasecmp(vp->name, name))) {
+                return vp;
+            }
+        }
+    }
     return 0;
 }
 
 static void RadiusAttrFree(RadiusAttr **vp)
 {
-    while(*vp) {
-      RadiusAttr *next = (*vp)->next;
-      ns_free(*vp);
-      *vp = next;
+    while (*vp) {
+        RadiusAttr *next = (*vp)->next;
+        ns_free(*vp);
+        *vp = next;
     }
 }
 
-static RadiusAttr *RadiusAttrParse(RadiusHeader *auth,int len,char *secret)
+static RadiusAttr *RadiusAttrParse(Server *server, RadiusHeader *auth, int len, char *secret)
 {
-    RadiusAttr *head = 0,*vp;
-    int length,vendor,attr,attrlen;
-    unsigned char *ptr,*p0 = (unsigned char*)auth;
+    RadiusAttr *head = 0, *vp;
+    int length, vendor, attr, attrlen;
+    unsigned char *ptr, *p0 = (unsigned char*)auth;
 
     // Extract attribute-value pairs
     ptr = p0 + sizeof(RadiusHeader);
     length = ntohs(auth->length) - sizeof(RadiusHeader);
-    while(length > 0) {
-      if((ptr - p0) + 2 >= RADIUS_BUFFER_LEN) break;
-      vendor = 0;
-      attr = *ptr++;
-      attrlen = *ptr++;
-      attrlen -= 2;
-      if(attrlen < 0 ||
-         attrlen > RADIUS_STRING_LEN ||
-         (ptr - p0) + attrlen >= RADIUS_BUFFER_LEN) break;
-      // Vendor specific attribute
-      if(attr == RADIUS_VENDOR_SPECIFIC) {
-        if(((ptr - p0)) + attrlen + 6 >= RADIUS_BUFFER_LEN) break;
-        memcpy(&vendor,ptr,sizeof(unsigned int));
-        vendor = ntohl(vendor);
-        ptr += 4;
-        attr = *ptr++;
-        ptr++;
-        attrlen -= 6;
-      }
-      if((vp = RadiusAttrCreate(0,attr,vendor,ptr,attrlen))) {
-        RadiusAttrLink(&head,vp);
-        /* Perform decryption if necessary */
-        switch(vp->attribute) {
-         case RADIUS_USER_PASSWORD:
-            RadiusPasswdDecrypt(vp,auth->vector,secret,0,0);
+    while (length > 0) {
+        if ((ptr - p0) + 2 >= RADIUS_BUFFER_LEN) {
             break;
         }
-      }
-      ptr += attrlen;
-      length -= attrlen + 2;
+        vendor = 0;
+        attr = *ptr++;
+        attrlen = *ptr++;
+        attrlen -= 2;
+        if (attrlen < 0 ||
+            attrlen > RADIUS_STRING_LEN ||
+            (ptr - p0) + attrlen >= RADIUS_BUFFER_LEN) {
+            break;
+        }
+        // Vendor specific attribute
+        if (attr == RADIUS_VENDOR_SPECIFIC) {
+            if (((ptr - p0)) + attrlen + 6 >= RADIUS_BUFFER_LEN) {
+                break;
+            }
+            memcpy(&vendor, ptr, sizeof(unsigned int));
+            vendor = ntohl(vendor);
+            ptr += 4;
+            attr = *ptr++;
+            ptr++;
+            attrlen -= 6;
+        }
+        if ((vp = RadiusAttrCreate(server, 0, attr, vendor, (char*)ptr, attrlen))) {
+            RadiusAttrLink(&head, vp);
+            /* Perform decryption if necessary */
+            switch(vp->attribute) {
+             case RADIUS_USER_PASSWORD:
+                RadiusPasswdDecrypt(vp, auth->vector, secret, 0, 0);
+                break;
+            }
+        }
+        ptr += attrlen;
+        length -= attrlen + 2;
     }
     return head;
 }
 
-static unsigned char *RadiusAttrPack(RadiusAttr *vp,unsigned char *ptr,short *length)
+static unsigned char *RadiusAttrPack(RadiusAttr *vp, unsigned char *ptr, short *length)
 {
     unsigned char *p0 = ptr;
-    unsigned int lvalue,len,vlen = 0;
+    unsigned int lvalue, len, vlen = 0;
 
-    if(!ptr || !vp) return ptr;
-
-    if(vp->vendor) {
-      vlen = 6;
-      if(*length + vlen >= RADIUS_BUFFER_LEN) return p0;
-      *ptr++ = RADIUS_VENDOR_SPECIFIC;
-      *ptr++ = 6; /* Length of VS header (len/opt/oid) */
-      lvalue = htonl(vp->vendor);
-      memcpy(ptr, &lvalue, sizeof(unsigned int));
-      ptr += 4;
+    if (!ptr || !vp) {
+        return ptr;
     }
-    switch(vp->type) {
+
+    if (vp->vendor) {
+        vlen = 6;
+        if (*length + vlen >= RADIUS_BUFFER_LEN) {
+            return p0;
+        }
+        *ptr++ = RADIUS_VENDOR_SPECIFIC;
+        *ptr++ = 6; /* Length of VS header (len/opt/oid) */
+        lvalue = htonl(vp->vendor);
+        memcpy(ptr,  &lvalue,  sizeof(unsigned int));
+        ptr += 4;
+    }
+    switch (vp->type) {
      case RADIUS_TYPE_STRING:
      case RADIUS_TYPE_FILTER_BINARY:
          len = strlen((char*)vp->sval);
-         if(*length + vlen+len+2 >= RADIUS_BUFFER_LEN) return p0;
+         if (*length + vlen+len+2 >= RADIUS_BUFFER_LEN) {
+             return p0;
+         }
          *ptr++ = vp->attribute;
          *ptr++ = len + 2;
-         memcpy(ptr,vp->sval,len);
+         memcpy(ptr, vp->sval, len);
          ptr += len;
          *length += vlen + len + 2;
          break;
@@ -2668,46 +2887,52 @@ static unsigned char *RadiusAttrPack(RadiusAttr *vp,unsigned char *ptr,short *le
      case RADIUS_TYPE_IPADDR:
      case RADIUS_TYPE_INTEGER:
          len = sizeof(lvalue);
-         if(*length + vlen+len+2 >= RADIUS_BUFFER_LEN) return p0;
+         if (*length + vlen+len+2 >= RADIUS_BUFFER_LEN) {
+             return p0;
+         }
          *ptr++ = vp->attribute;
          *ptr++ = sizeof(lvalue) + 2;
          lvalue = htonl(vp->lval);
-         memcpy(ptr,(char *)&lvalue,sizeof(lvalue));
+         memcpy(ptr, (char *)&lvalue, sizeof(lvalue));
          ptr += len;
          *length += vlen + len + 2;
          break;
      default:
          return p0;
     }
-    if(vp->vendor) *p0 += len+2;
+    if (vp->vendor) {
+        *p0 += len+2;
+    }
     return ptr;
 }
 
-static void RadiusHeaderPack(RadiusHeader *hdr,int id,int code,RadiusVector vector,RadiusAttr *vp,char *secret)
+static void RadiusHeaderPack(RadiusHeader *hdr, int id, int code, RadiusVector vector, RadiusAttr *vp, char *secret)
 {
     MD5_CTX md5;
     unsigned char *ptr;
     RadiusVector digest;
 
-    if(!hdr || !secret || !vector) return;
+    if (!hdr || !secret || !vector) {
+        return;
+    }
     // Generate random id
-    if(!id) {
-      srand(time(0) ^ getpid());
-      id = (rand() ^ (int)hdr);
+    if (!id) {
+        srand(time(0) ^ getpid());
+        id = (rand() ^ (int)hdr);
     }
     hdr->id = id;
     hdr->code = code;
     hdr->length = sizeof(RadiusHeader);
     ptr = ((unsigned char*)hdr) + hdr->length;
-    memcpy(hdr->vector,vector,RADIUS_VECTOR_LEN);
+    memcpy(hdr->vector, vector, RADIUS_VECTOR_LEN);
     // Pack attributes into the packet
-    for(;vp;vp = vp->next) {
-      switch(vp->attribute) {
-       case RADIUS_USER_PASSWORD:
-          RadiusPasswdEncrypt(vp,hdr->vector,secret,0,0);
-          break;
-      }
-      ptr = RadiusAttrPack(vp,ptr,(short*)&hdr->length);
+    for (;vp;vp = vp->next) {
+        switch(vp->attribute) {
+         case RADIUS_USER_PASSWORD:
+            RadiusPasswdEncrypt(vp, hdr->vector, secret, 0, 0);
+            break;
+        }
+        ptr = RadiusAttrPack(vp, ptr, (short*)&hdr->length);
     }
     hdr->length = htons(hdr->length);
     // Finish packing
@@ -2718,12 +2943,12 @@ static void RadiusHeaderPack(RadiusHeader *hdr,int id,int code,RadiusVector vect
 
      case RADIUS_ACCOUNTING_REQUEST:
         /* Calculate the md5 hash over the entire packet and put it in the vector. */
-        memset(hdr->vector,0,RADIUS_VECTOR_LEN);
+        memset(hdr->vector, 0, RADIUS_VECTOR_LEN);
         MD5Init(&md5);
-        MD5Update(&md5,(unsigned char *)hdr,ntohs(hdr->length));
-        MD5Update(&md5,(unsigned char *)secret,strlen(secret));
-        MD5Final(digest,&md5);
-        memcpy(hdr->vector,vector,RADIUS_VECTOR_LEN);
+        MD5Update(&md5, (unsigned char *)hdr, ntohs(hdr->length));
+        MD5Update(&md5, (unsigned char *)secret, strlen(secret));
+        MD5Final(digest, &md5);
+        memcpy(hdr->vector, vector, RADIUS_VECTOR_LEN);
         break;
 
      case RADIUS_ACCESS_ACCEPT:
@@ -2731,65 +2956,154 @@ static void RadiusHeaderPack(RadiusHeader *hdr,int id,int code,RadiusVector vect
      case RADIUS_ACCOUNTING_RESPONSE:
      case RADIUS_ACCESS_CHALLENGE:
         MD5Init(&md5);
-        MD5Update(&md5,(unsigned char *)hdr,ntohs(hdr->length));
-        MD5Update(&md5,(unsigned char *)secret,strlen(secret));
-        MD5Final(digest,&md5);
-        memcpy(hdr->vector,digest,RADIUS_VECTOR_LEN);
+        MD5Update(&md5, (unsigned char *)hdr, ntohs(hdr->length));
+        MD5Update(&md5, (unsigned char *)secret, strlen(secret));
+        MD5Final(digest, &md5);
+        memcpy(hdr->vector, digest, RADIUS_VECTOR_LEN);
         break;
 
      default:
         /* Calculate the response digest and store it in the vector */
-        memset(hdr->vector,0,RADIUS_VECTOR_LEN);
+        memset(hdr->vector, 0, RADIUS_VECTOR_LEN);
         MD5Init(&md5);
-        MD5Update(&md5,(unsigned char *)hdr,ntohs(hdr->length));
-        MD5Update(&md5,(unsigned char *)secret,strlen(secret));
-        MD5Final(digest,&md5);
-        memcpy(hdr->vector,digest,RADIUS_VECTOR_LEN);
+        MD5Update(&md5, (unsigned char *)hdr, ntohs(hdr->length));
+        MD5Update(&md5, (unsigned char *)secret, strlen(secret));
+        MD5Final(digest, &md5);
+        memcpy(hdr->vector, digest, RADIUS_VECTOR_LEN);
         break;
     }
 }
 
-static void RadiusClientAdd(Server *server,char *host,char *secret)
+static void RadiusClientAdd(Server *server, char *host, char *secret)
 {
     RadiusClient *client;
     struct sockaddr_in addr;
 
-    if(Ns_GetSockAddr(&addr,host,0) != NS_OK) return;
-    client = (RadiusClient*)ns_calloc(1,sizeof(RadiusClient));
+    if (Ns_GetSockAddr(&addr, host, 0) != NS_OK) {
+        return;
+    }
+    client = (RadiusClient*)ns_calloc(1, sizeof(RadiusClient));
     client->addr = addr.sin_addr;
-    strncpy(client->secret,secret,RADIUS_VECTOR_LEN);
+    strncpy(client->secret, secret, RADIUS_VECTOR_LEN);
     Ns_MutexLock(&server->radius.clientMutex);
     client->next = server->radius.clientList;
-    if(client->next) client->next->prev = client;
+    if (client->next) {
+        client->next->prev = client;
+    }
     server->radius.clientList = client;
     Ns_MutexUnlock(&server->radius.clientMutex);
 }
 
-static void RadiusClientPrintf(Server *server,Ns_DString *ds)
+static void RadiusClientPrintf(Server *server, Ns_DString *ds)
 {
     RadiusClient *client;
 
     Ns_MutexLock(&server->radius.clientMutex);
-    for(client = server->radius.clientList;client;client = client->next)
-      Ns_DStringPrintf(ds,"%s %s ",ns_inet_ntoa(client->addr),client->secret);
+    for (client = server->radius.clientList; client; client = client->next) {
+        Ns_DStringPrintf(ds, "%s %s ", ns_inet_ntoa(client->addr), client->secret);
+    }
     Ns_MutexUnlock(&server->radius.clientMutex);
 }
 
-static RadiusClient *RadiusClientFind(Server *server,struct in_addr addr,int unlink)
+static RadiusClient *RadiusClientFind(Server *server, struct in_addr addr, int unlink)
 {
     RadiusClient *client = 0;
 
     Ns_MutexLock(&server->radius.clientMutex);
-    for(client = server->radius.clientList;client;client = client->next)
-      if(!memcmp(&client->addr,&addr,sizeof(struct in_addr))) break;
-    if(unlink && client) {
-      if(client->prev) client->prev->next = client->next;
-      if(client->next) client->next->prev = client->prev;
-      if(client == server->radius.clientList) server->radius.clientList = client->next;
-      client->next = client->prev = 0;
+    for (client = server->radius.clientList; client; client = client->next) {
+        if (!memcmp(&client->addr, &addr, sizeof(struct in_addr))) {
+            break;
+        }
+    }
+    if (unlink && client) {
+        if (client->prev) {
+            client->prev->next = client->next;
+        }
+        if (client->next) {
+            client->next->prev = client->prev;
+        }
+        if (client == server->radius.clientList) {
+            server->radius.clientList = client->next;
+        }
+        client->next = client->prev = 0;
     }
     Ns_MutexUnlock(&server->radius.clientMutex);
     return client;
+}
+
+static RadiusUser *RadiusUserAdd(Server *server, char *user)
+{
+    int n;
+    RadiusUser *rec;
+    Tcl_HashEntry *entry;
+
+    Ns_MutexLock(&server->radius.userMutex);
+    entry = Tcl_CreateHashEntry(&server->radius.userList, user, &n);
+    if (n) {
+        rec = (RadiusUser*)ns_calloc(1, sizeof(RadiusUser));
+        Tcl_SetHashValue(entry, (ClientData)rec);
+    }
+    rec = (RadiusUser*)Tcl_GetHashValue(entry);
+    Ns_MutexUnlock(&server->radius.userMutex);
+    return rec;
+}
+
+static void RadiusUserDel(Server *server, char *user)
+{
+    Tcl_HashEntry *entry;
+    Tcl_HashSearch search;
+
+    Ns_MutexLock(&server->radius.userMutex);
+    entry = Tcl_FirstHashEntry(&server->radius.userList, &search);
+    while (entry) {
+      if (!user || Tcl_StringCaseMatch(Tcl_GetHashKey(&server->radius.userList, entry), user, 1)) {
+          ns_free(Tcl_GetHashValue(entry));
+          Tcl_DeleteHashEntry(entry);
+      }
+      entry = Tcl_NextHashEntry(&search);
+    }
+    Ns_MutexUnlock(&server->radius.userMutex);
+}
+
+static RadiusUser *RadiusUserFind(Server *server, char *user, Ns_DString *ds)
+{
+    RadiusUser *rec = 0;
+    Tcl_HashEntry *entry;
+
+    Ns_MutexLock(&server->radius.userMutex);
+    entry = Tcl_FindHashEntry(&server->radius.userList, user);
+    if (entry) {
+        rec = (RadiusUser*)Tcl_GetHashValue(entry);
+        Ns_DStringAppend(ds, "{");
+        RadiusAttrPrintf(rec->check, ds, 1, 1);
+        Ns_DStringAppend(ds, "} {");
+        RadiusAttrPrintf(rec->reply, ds, 1, 1);
+        Ns_DStringAppend(ds, "} ");
+    }
+    Ns_MutexUnlock(&server->radius.userMutex);
+    return rec;
+}
+
+static void RadiusUserList(Server *server, char *user, Ns_DString *ds)
+{
+    RadiusUser *rec;
+    Tcl_HashEntry *entry;
+    Tcl_HashSearch search;
+
+    Ns_MutexLock(&server->radius.userMutex);
+    entry = Tcl_FirstHashEntry(&server->radius.userList, &search);
+    while (entry) {
+      if (!user || Tcl_StringCaseMatch(Tcl_GetHashKey(&server->radius.userList, entry), user, 1)) {
+          rec = (RadiusUser*)Tcl_GetHashValue(entry);
+          Ns_DStringPrintf(ds, "%s {", Tcl_GetHashKey(&server->radius.userList, entry));
+          RadiusAttrPrintf(rec->check, ds, 1, 1);
+          Ns_DStringAppend(ds, "} {");
+          RadiusAttrPrintf(rec->reply, ds, 1, 1);
+          Ns_DStringAppend(ds, "} ");
+      }
+      entry = Tcl_NextHashEntry(&search);
+    }
+    Ns_MutexUnlock(&server->radius.userMutex);
 }
 
 /*
@@ -2807,308 +3121,365 @@ static RadiusClient *RadiusClientFind(Server *server,struct in_addr addr,int unl
  *
  *----------------------------------------------------------------------
  */
-static int RadiusCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
+static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
     fd_set rfds;
     Ns_DString ds;
     int retries = 3;
     int timeout = 2;
     struct timeval tm;
-    RadiusHeader *hdr;
-    int fd,id,len,port;
+    int fd, id, len, port, n, vendor;
     struct sockaddr_in sa;
-    RadiusVector vector;
-    RadiusAttr *attr,*vp = 0;
+    Server *server = (Server*)arg;
     socklen_t salen = sizeof(sa);
     int code = RADIUS_ACCESS_REQUEST;
     unsigned char buffer[RADIUS_BUFFER_LEN];
+    RadiusHeader *hdr;
+    RadiusVector vector;
+    RadiusAttr *attr, *vp = 0;
+    RadiusClient *client = 0;
+    RadiusUser *user;
+    RadiusDict *dict = 0;
+    RadiusValue *value;
+    RadiusRequest *req;
+    enum commands {
+        cmdSend, cmdReqGet, cmdReqSet, cmdReqList,
+        cmdDictList, cmdDictGet, cmdDictDel, cmdDictAdd, cmdDictValue, cmdDictLabel,
+        cmdClientAdd, cmdClientList, cmdClientDel, cmdClientGet,
+        cmdUserAdd, cmdUserFind, cmdUserDel, cmdUserList
+    };
+    static const char *sCmd[] = {
+        "send", "reqget", "reqset", "reqlist",
+        "dictlist", "dictget", "dictdel", "dictadd", "dictvalue", "dictlabel",
+        "clientadd", "clientlist", "clientdel", "clientget",
+        "useradd", "userfind", "userdel", "userlist"
+    };
+    int cmd;
 
-    if(argc < 4) {
-      Tcl_AppendResult(interp, "wrong # args: should be ",argv[0], " host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...",NULL);
-      return TCL_ERROR;
+    if (objc < 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "args");
+        return TCL_ERROR;
     }
-    if(!(port = atoi(argv[2]))) port = RADIUS_AUTH_PORT;
-    if(Ns_GetSockAddr((sockaddr_in*)&sa,(char*)argv[1],port) != NS_OK) {
-      Tcl_AppendResult(interp,"noHost: unknown host: ",argv[1],0);
-      return TCL_ERROR;
+    if (Tcl_GetIndexFromObj(interp, objv[1], sCmd, "command", TCL_EXACT, (int *)&cmd) != TCL_OK) {
+        return TCL_ERROR;
     }
-    for(int i = 4;i < argc - 1;i += 2) {
-      if(!strcasecmp(argv[i],"Code")) code = atoi(argv[i+1]); else
-      if(!strcasecmp(argv[i],"Retries")) retries = atoi(argv[i+1]); else
-      if(!strcasecmp(argv[i],"Timeout")) timeout = atoi(argv[i+1]); else {
-        if((attr = RadiusAttrCreate((char*)argv[i],0,0,(unsigned char*)argv[i+1],-1)))
-          RadiusAttrLink(&vp,attr);
-        else {
-          Tcl_AppendResult(interp,"unknown attribute ",argv[i]," ",argv[i+1],0);
-          return TCL_ERROR;
-        } 
-      }
-    }
-    if((fd = socket(AF_INET,SOCK_DGRAM,0)) < 0) {
-      Tcl_AppendResult(interp,"noResponse: ",strerror(errno),0);
-      RadiusAttrFree(&vp);
-      return -1;
-    }
-    // Build an request
-    hdr = (RadiusHeader *)buffer;
-    RadiusVectorCreate(vector);
-    RadiusHeaderPack(hdr,0,code,vector,vp,(char*)argv[3]);
-    RadiusAttrFree(&vp);
-    memcpy(vector,hdr->vector,RADIUS_VECTOR_LEN);
-    id = hdr->id;
+
+    switch (cmd) {
+     case cmdSend:
+        if (objc < 4) {
+            Tcl_WrongNumArgs(interp, 2, objv, "host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...");
+            return TCL_ERROR;
+        }
+        if (Ns_GetSockAddr((sockaddr_in*)&sa, (char*)Tcl_GetString(objv[2]), port) != NS_OK) {
+            Tcl_AppendResult(interp, "noHost: unknown host: ", Tcl_GetString(objv[2]), 0);
+            return TCL_ERROR;
+        }
+        if (!(port = atoi(Tcl_GetString(objv[3])))) {
+            port = RADIUS_AUTH_PORT;
+        }
+        for (int i = 5;i < objc - 1;i += 2) {
+            if (!strcasecmp(Tcl_GetString(objv[i]), "Code")) {
+                code = atoi(Tcl_GetString(objv[i+1]));
+            } else
+            if (!strcasecmp(Tcl_GetString(objv[i]), "Retries")) {
+                retries = atoi(Tcl_GetString(objv[i+1]));
+            } else
+            if (!strcasecmp(Tcl_GetString(objv[i]), "Timeout")) {
+                timeout = atoi(Tcl_GetString(objv[i+1]));
+            } else {
+              if ((attr = RadiusAttrCreate(server, Tcl_GetString(objv[i]), -1, 0, Tcl_GetString(objv[i+1]), -1))) {
+                RadiusAttrLink(&vp, attr);
+              } else {
+                Tcl_AppendResult(interp, "unknown attribute ", Tcl_GetString(objv[i]), " ", Tcl_GetString(objv[i+1]), 0);
+                return TCL_ERROR;
+              }
+            }
+        }
+        if ((fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+            Tcl_AppendResult(interp, "noResponse: ", strerror(errno), 0);
+            RadiusAttrFree(&vp);
+            return -1;
+        }
+        // Build an request
+        hdr = (RadiusHeader *)buffer;
+        RadiusVectorCreate(vector);
+        RadiusHeaderPack(hdr, 0, code, vector, vp, (char*)Tcl_GetString(objv[4]));
+        RadiusAttrFree(&vp);
+        memcpy(vector, hdr->vector, RADIUS_VECTOR_LEN);
+        id = hdr->id;
 
 again:
-    if(sendto(fd,(char *)hdr,ntohs(hdr->length),0,(struct sockaddr *)&sa,sizeof(struct sockaddr_in)) <= 0) {
-      Tcl_AppendResult(interp,"noResponse: ",strerror(errno),0);
-      close(fd);
-      return TCL_ERROR;
-    }
-    tm.tv_usec = 0L;
-    tm.tv_sec = timeout;
-    FD_ZERO(&rfds);
-    FD_SET(fd,&rfds);
-    if(select(fd + 1,&rfds,0,0,&tm) < 0) {
-      if(errno == EINTR) goto again;
-      Tcl_AppendResult(interp,"noResponse: ",strerror(errno),0);
-      close(fd);
-      return TCL_ERROR;
-    }
-    if(!FD_ISSET(fd,&rfds)) {
-      if(--retries > 0) goto again;
-      Tcl_AppendResult(interp,"noResponse: timeout",0);
-      close(fd);
-      return TCL_ERROR;
-    }
-    if((len = recvfrom(fd,(char *)buffer,sizeof(buffer),0,(struct sockaddr*)&sa,(socklen_t*)&salen)) <= 0) {
-      Tcl_AppendResult(interp,"noResponse: ",strerror(errno),0);
-      close(fd);
-      return TCL_ERROR;
-    }
-    close(fd);
-    // Verify that id (seq. number) matches what we sent
-    if(hdr->id != (u_char)id || len < ntohs(hdr->length)) {
-      Tcl_AppendResult(interp,"noResponse: ID/length does not match",0);
-      return TCL_ERROR;
-    }
-    // Verify reply md5 digest
-    if(RadiusVectorVerify(hdr,vector,(char*)argv[3])) {
-      Tcl_AppendResult(interp,"noResponse: invalid reply digest",0);
-      return TCL_ERROR;
-    }
-    Ns_DStringInit(&ds);
-    Ns_DStringPrintf(&ds,"code %d id %d ipaddr %s ",hdr->code,hdr->id,ns_inet_ntoa(sa.sin_addr));
-    if((vp = RadiusAttrParse(hdr,len,(char*)argv[3]))) {
-      RadiusAttrPrintf(vp,&ds,1,1);
-      RadiusAttrFree(&vp);
-    }
-    Tcl_AppendResult(interp,ds.string,0);
-    Ns_DStringFree(&ds);
-    return TCL_OK;
-}
+        if (sendto(fd, (char *)hdr, ntohs(hdr->length), 0, (struct sockaddr *)&sa, sizeof(struct sockaddr_in)) <= 0) {
+            Tcl_AppendResult(interp, "noResponse: ", strerror(errno), 0);
+            close(fd);
+            return TCL_ERROR;
+        }
+        tm.tv_usec = 0L;
+        tm.tv_sec = timeout;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        if (select(fd + 1, &rfds, 0, 0, &tm) < 0) {
+            if (errno == EINTR) goto again;
+            Tcl_AppendResult(interp, "noResponse: ", strerror(errno), 0);
+            close(fd);
+            return TCL_ERROR;
+        }
+        if (!FD_ISSET(fd, &rfds)) {
+            if (--retries > 0) goto again;
+            Tcl_AppendResult(interp, "noResponse: timeout", 0);
+            close(fd);
+            return TCL_ERROR;
+        }
+        if ((len = recvfrom(fd, (char *)buffer, sizeof(buffer), 0, (struct sockaddr*)&sa, (socklen_t*)&salen)) <= 0) {
+            Tcl_AppendResult(interp, "noResponse: ", strerror(errno), 0);
+            close(fd);
+            return TCL_ERROR;
+        }
+        close(fd);
+        // Verify that id (seq. number) matches what we sent
+        if (hdr->id != (u_char)id || len < ntohs(hdr->length)) {
+            Tcl_AppendResult(interp, "noResponse: ID/length does not match", 0);
+            return TCL_ERROR;
+        }
+        // Verify reply md5 digest
+        if (RadiusVectorVerify(hdr, vector, (char*)Tcl_GetString(objv[3]))) {
+            Tcl_AppendResult(interp, "noResponse: invalid reply digest", 0);
+            return TCL_ERROR;
+        }
+        Ns_DStringInit(&ds);
+        Ns_DStringPrintf(&ds, "code %d id %d ipaddr %s ", hdr->code, hdr->id, ns_inet_ntoa(sa.sin_addr));
+        if ((vp = RadiusAttrParse(server, hdr, len, (char*)Tcl_GetString(objv[4])))) {
+            RadiusAttrPrintf(vp, &ds, 1, 1);
+            RadiusAttrFree(&vp);
+        }
+        Tcl_AppendResult(interp, ds.string, 0);
+        Ns_DStringFree(&ds);
+        break;
 
-/*
- *----------------------------------------------------------------------
- *
- * RadiusDictCmd --
- *
- *	Manages RADIUS dictionary
- *
- * Results:
- *      reply code and attributes list or error
- *
- * Side effects:
- *  	None
- *
- *----------------------------------------------------------------------
- */
-static int RadiusDictCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
-{
-    int n;
-    Ns_DString ds;
-    RadiusDict *dict = 0;
+     case cmdDictList:
+        Ns_DStringInit(&ds);
+        RadiusDictPrintf(server, &ds);
+        Tcl_AppendResult(interp, ds.string, 0);
+        Ns_DStringFree(&ds);
+        break;
 
-    if(argc < 2) {
-      Tcl_AppendResult(interp, "wrong # args: should be ",argv[0], " command",NULL);
-      return TCL_ERROR;
-    }
-    if(!strcmp(argv[1],"list")) {
-      Ns_DStringInit(&ds);
-      RadiusDictPrintf(&ds);
-      Tcl_AppendResult(interp,ds.string,0);
-      Ns_DStringFree(&ds);
-    } else
-    if(!strcmp(argv[1],"add")) {
-      if(argc < 6) {
-        Tcl_AppendResult(interp, "wrong # args: should be ",argv[0], " add name attr vendor type",NULL);
-        return TCL_ERROR;
-      }
-      if(!strcmp(argv[5],"string")) n = RADIUS_TYPE_STRING; else
-      if(!strcmp(argv[5],"filter")) n = RADIUS_TYPE_FILTER_BINARY; else
-      if(!strcmp(argv[5],"integer")) n = RADIUS_TYPE_INTEGER; else
-      if(!strcmp(argv[5],"ipaddr")) n = RADIUS_TYPE_IPADDR; else
-      if(!strcmp(argv[5],"date")) n = RADIUS_TYPE_DATE; else n = atoi(argv[5]);
-      if(!RadiusDictFind(atoi(argv[3]),atoi(argv[4]),0))
-        RadiusDictAdd((char*)argv[2],atoi(argv[3]),atoi(argv[4]),n);
-    } else
-    if(!strcmp(argv[1],"get")) {
-      if(argc < 3) {
-        Tcl_AppendResult(interp, "wrong # args: should be ",argv[0], " get name|attr ?vendor?",NULL);
-        return TCL_ERROR;
-      }
-      if((n = atoi(argv[2])) > 0)
-        dict = RadiusDictFind(n,argc > 3 ? atoi(argv[3]): 0,1);
-      else
-        dict = RadiusDictFindName((char*)argv[2],argc > 3 ? atoi(argv[3]): 0,1);
-      if(dict) {
-        char buffer[256];
-        sprintf(buffer,"%s %d %d",dict->name,dict->vendor,dict->type);
-        Tcl_AppendResult(interp,buffer,0);
-      }
-    } else
-    if(!strcmp(argv[1],"del")) {
-      if(argc < 3) {
-        Tcl_AppendResult(interp, "wrong # args: should be ",argv[0], " del name|attr ?vendor?",NULL);
-        return TCL_ERROR;
-      }
-      if((n = atoi(argv[2])) > 0)
-        dict = RadiusDictFind(n,argc > 3 ? atoi(argv[3]): 0,1);
-      else
-        dict = RadiusDictFindName((char*)argv[2],argc > 3 ? atoi(argv[3]): 0,1);
-      ns_free(dict);
-    }
-    return TCL_OK;
-}
+     case cmdDictAdd:
+        if (objc < 6) {
+            Tcl_WrongNumArgs(interp, 2, objv, "name attr vendor type valname valnum ...");
+            return TCL_ERROR;
+        }
+        if (!strcmp(Tcl_GetString(objv[5]), "string")) {
+            n = RADIUS_TYPE_STRING;
+        } else
+        if (!strcmp(Tcl_GetString(objv[5]), "filter")) {
+            n = RADIUS_TYPE_FILTER_BINARY;
+        } else
+        if (!strcmp(Tcl_GetString(objv[5]), "integer")) {
+            n = RADIUS_TYPE_INTEGER;
+        } else
+        if (!strcmp(Tcl_GetString(objv[5]), "ipaddr")) {
+            n = RADIUS_TYPE_IPADDR;
+        } else
+        if (!strcmp(Tcl_GetString(objv[5]), "date")) {
+            n = RADIUS_TYPE_DATE;
+        } else {
+            n = atoi(Tcl_GetString(objv[5]));
+        }
+        if (!RadiusDictFind(server, 0, atoi(Tcl_GetString(objv[3])), atoi(Tcl_GetString(objv[4])), 0)) {
+            dict = RadiusDictAdd(server, Tcl_GetString(objv[2]), atoi(Tcl_GetString(objv[3])), atoi(Tcl_GetString(objv[4])), n);
+        }
+        break;
 
-/*
- *----------------------------------------------------------------------
- *
- * RadiusClientCmd --
- *
- *	Manages RADIUS client list
- *
- * Results:
- *      reply code and attributes list or error
- *
- * Side effects:
- *  	None
- *
- *----------------------------------------------------------------------
- */
-static int RadiusClientCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
-{
-    Ns_DString ds;
-    struct sockaddr_in addr;
-    RadiusClient *client = 0;
-    Server *server = (Server *)arg;
-    
-    if(argc < 2) {
-      Tcl_AppendResult(interp, "wrong # args: should be ",argv[0]," command",NULL);
-      return TCL_ERROR;
-    }
-    if(!strcmp(argv[1],"get")) {
-      if(argc < 3) {
-        Tcl_AppendResult(interp, "wrong # args: should be ",argv[0]," get host",NULL);
-        return TCL_ERROR;
-      }
-      if(Ns_GetSockAddr(&addr,(char*)argv[2],0) == NS_OK && (client = RadiusClientFind(server,addr.sin_addr,0)))
-        Tcl_AppendResult(interp,client->secret,0);
-    } else
+     case cmdDictValue:
+        if (objc < 5) {
+            Tcl_WrongNumArgs(interp, 2, objv, "name vendor label");
+            return TCL_ERROR;
+        }
+        dict = RadiusDictFind(server, Tcl_GetString(objv[2]), -1, atoi(Tcl_GetString(objv[3])), 0);
+        if (dict) {
+            for (value = dict->values; value; value = value->next) {
+                if (!strcasecmp(value->name, Tcl_GetString(objv[4]))) {
+                    Tcl_SetObjResult(interp, Tcl_NewIntObj(value->value));
+                    return TCL_OK;
+                }
+            }
+        }
+        Tcl_AppendResult(interp, Tcl_GetString(objv[4]), 0);
+        break;
 
-    if(!strcmp(argv[1],"add")) {
-      if(argc < 4) {
-        Tcl_AppendResult(interp, "wrong # args: should be ",argv[0]," add host secret",NULL);
-        return TCL_ERROR;
-      }
-      RadiusClientAdd(server,(char*)argv[2],(char*)argv[3]);
-    } else
+     case cmdDictLabel:
+        if (objc < 5) {
+            Tcl_WrongNumArgs(interp, 2, objv, "namr vendor value");
+            return TCL_ERROR;
+        }
+        dict = RadiusDictFind(server, Tcl_GetString(objv[2]), -1, atoi(Tcl_GetString(objv[3])), 0);
+        if (dict) {
+            n = atoi(Tcl_GetString(objv[4]));
+            for (value = dict->values; value; value = value->next) {
+                if (value->value == n) {
+                    Tcl_AppendResult(interp, value->name, 0);
+                    return TCL_OK;
+                }
+            }
+        }
+        Tcl_AppendResult(interp, Tcl_GetString(objv[4]), 0);
+        break;
 
-    if(!strcmp(argv[1],"del")) {
-      if(argc < 3) {
-        Tcl_AppendResult(interp, "wrong # args: should be ",argv[0]," del host",NULL);
-        return TCL_ERROR;
-      }
-      if(Ns_GetSockAddr(&addr,(char*)argv[2],0) == NS_OK) client = RadiusClientFind(server,addr.sin_addr,1);
-      ns_free(client);
-    } else
+     case cmdDictGet:
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "name|attr ?vendor?");
+            return TCL_ERROR;
+        }
+        dict = RadiusDictFind(server, Tcl_GetString(objv[2]), -1, objc > 3 ? atoi(Tcl_GetString(objv[3])) : -1, 0);
+        if (dict) {
+            char buffer[256];
+            sprintf(buffer, "%s %d %d", dict->name, dict->vendor, dict->type);
+            Tcl_AppendResult(interp, buffer, 0);
+        }
+        break;
 
-    if(!strcmp(argv[1],"list")) {
-      Ns_DStringInit(&ds);
-      RadiusClientPrintf(server,&ds);
-      Tcl_AppendResult(interp,ds.string,0);
-      Ns_DStringFree(&ds);
-    }
-    return TCL_OK;
-}
+     case cmdDictDel:
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "del name|attr ?vendor?");
+            return TCL_ERROR;
+        }
+        dict = RadiusDictFind(server, Tcl_GetString(objv[2]), -1, objc > 3 ? atoi(Tcl_GetString(objv[3])) : 0, 1);
+        ns_free(dict);
+        break;
 
-/*
- *----------------------------------------------------------------------
- *
- * RadiusReqCmd --
- *
- *	Special ns_radiusreq command for access to current RADIUS request structure
- *
- * Results:
- *  	Standard Tcl result.
- *
- * Side effects:
- *  	None.
- *
- *----------------------------------------------------------------------
- */
+     case cmdClientGet:
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "host");
+            return TCL_ERROR;
+        }
+        if (Ns_GetSockAddr(&sa, (char*)Tcl_GetString(objv[2]), 0) == NS_OK && (client = RadiusClientFind(server, sa.sin_addr, 0))) {
+            Tcl_AppendResult(interp, client->secret, 0);
+        }
+        break;
 
-static int RadiusReqCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char **argv)
-{
-    Ns_DString ds;
-    RadiusAttr *attr;
-    RadiusRequest *req = (RadiusRequest *)arg;
+     case cmdClientAdd:
+        if (objc < 4) {
+            Tcl_WrongNumArgs(interp, 2, objv, "host secret");
+            return TCL_ERROR;
+        }
+        RadiusClientAdd(server, (char*)Tcl_GetString(objv[2]), (char*)Tcl_GetString(objv[3]));
+        break;
 
-    if (argc < 2) {
-      Tcl_AppendResult(interp, "wrong # args: should be ",argv[0], "get|set|array",NULL);
-      return TCL_ERROR;
-    }
-    Tcl_ResetResult(interp);
+     case cmdClientDel:
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "host");
+            return TCL_ERROR;
+        }
+        if (Ns_GetSockAddr(&sa, Tcl_GetString(objv[2]), 0) == NS_OK) {
+            client = RadiusClientFind(server, sa.sin_addr, 1);
+        }
+        ns_free(client);
+        break;
 
-    if(!strcmp(argv[1],"get")) {
-      int vendor = 0;
-      if(argc < 3) {
-        Tcl_AppendResult(interp, "wrong # args: should be ",argv[0]," get name ?vendor?",NULL);
-        return TCL_ERROR;
-      }
-      if(argc > 3) vendor = atoi(argv[3]);
-      Ns_DStringInit(&ds);
-      if(!strcmp(argv[2],"code")) {
-        Ns_DStringPrintf(&ds,"%d",req->req_code);
-      } else
-      if(!strcmp(argv[2],"id")) {
-        Ns_DStringPrintf(&ds,"%d",req->req_id);
-      } else
-      if(!strcmp(argv[2],"ipaddr")) {
-        Ns_DStringAppend(&ds,ns_inet_ntoa(req->addr.sin_addr));
-      } else
-      if((atoi(argv[2]) > 0 && (attr = RadiusAttrFind(req->req,atoi(argv[2]),vendor))) ||
-         (attr = RadiusAttrFindName(req->req,(char*)argv[2],vendor))) {
-        RadiusAttrPrintf(attr,&ds,0,0);
-      }
-      Tcl_AppendResult(interp,ds.string,0);
-      Ns_DStringFree(&ds);
-    } else
+     case cmdClientList:
+        Ns_DStringInit(&ds);
+        RadiusClientPrintf(server, &ds);
+        Tcl_AppendResult(interp, ds.string, 0);
+        Ns_DStringFree(&ds);
+        break;
 
-    if(!strcmp(argv[1],"set")) {
-      for(int i = 2;i < argc - 1;i += 2) {
-        if(!strcmp(argv[i],"code"))
-          req->reply_code = atoi(argv[i+1]);
-        else
-        if((attr = RadiusAttrCreate((char*)argv[i],atoi(argv[i]),0,(unsigned char*)argv[i+1],-1)))
-          RadiusAttrLink(&req->reply,attr);
-      }
-    } else
+     case cmdUserList:
+        Ns_DStringInit(&ds);
+        RadiusUserList(server, objc > 2 ? Tcl_GetString(objv[2]) : 0, &ds);
+        Tcl_AppendResult(interp, ds.string, 0);
+        Ns_DStringFree(&ds);
+        break;
 
-    if(!strcmp(argv[1],"array")) {
-      Ns_DStringInit(&ds);
-      Ns_DStringPrintf(&ds,"code %d id %d ipaddr %s ",req->req_code,req->req_id,ns_inet_ntoa(req->addr.sin_addr));
-      RadiusAttrPrintf(req->req,&ds,1,1);
-      Tcl_AppendResult(interp,ds.string,0);
-      Ns_DStringFree(&ds);
+     case cmdUserFind:
+        Ns_DStringInit(&ds);
+        if (RadiusUserFind(server, Tcl_GetString(objv[2]), &ds)) {
+            Tcl_AppendResult(interp, ds.string, 0);
+        }
+        Ns_DStringFree(&ds);
+        break;
+
+     case cmdUserAdd:
+        if (objc < 4) {
+            Tcl_WrongNumArgs(interp, 2, objv, "name checkattrs ?replyattrs?");
+            return TCL_ERROR;
+        }
+        if ((user = RadiusUserAdd(server, Tcl_GetString(objv[2])))) {
+            RadiusAttr *attr;
+            Tcl_Obj *key, *val;
+            Tcl_ListObjLength(0, objv[3], &len);
+            for (int i = 0; i < len; i+= 2) {
+                if (Tcl_ListObjIndex(0, objv[3], i, &key) == TCL_OK &&
+                    Tcl_ListObjIndex(0, objv[3], i+1, &val) == TCL_OK && key && val) {
+                    if ((attr = RadiusAttrCreate(server, Tcl_GetString(key), -1, -1, Tcl_GetString(val), -1))) {
+                        RadiusAttrLink(&user->check, attr);
+                    }
+                }
+            }
+            if (objc > 4) {
+                Tcl_ListObjLength(0, objv[4], &len);
+                for (int i = 0; i < len; i+= 2) {
+                    if (Tcl_ListObjIndex(0, objv[4], i, &key) == TCL_OK &&
+                        Tcl_ListObjIndex(0, objv[4], i+1, &val) == TCL_OK && key && val) {
+                        if ((attr = RadiusAttrCreate(server, Tcl_GetString(key), -1, -1, Tcl_GetString(val), -1))) {
+                            RadiusAttrLink(&user->reply, attr);
+                        }
+                    }
+                }
+            }
+        }
+        break;
+
+     case cmdUserDel:
+        RadiusUserDel(server, objc > 2 ? Tcl_GetString(objv[2]) : 0);
+        break;
+
+     case cmdReqGet:
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "name ?vendor?");
+            return TCL_ERROR;
+        }
+        vendor = -1;
+        if (objc > 3) {
+            vendor = atoi(Tcl_GetString(objv[3]));
+        }
+        Ns_DStringInit(&ds);
+        req = (RadiusRequest*)Ns_TlsGet(&radiusTls);
+        if (!strcmp(Tcl_GetString(objv[2]), "code")) {
+            Ns_DStringPrintf(&ds, "%d", req->req_code);
+        } else
+        if (!strcmp(Tcl_GetString(objv[2]), "id")) {
+            Ns_DStringPrintf(&ds, "%d", req->req_id);
+        } else
+        if (!strcmp(Tcl_GetString(objv[2]), "ipaddr")) {
+            Ns_DStringAppend(&ds, ns_inet_ntoa(req->addr.sin_addr));
+        } else
+        if ((attr = RadiusAttrFind(req->req, Tcl_GetString(objv[2]), -1, vendor))) {
+            RadiusAttrPrintf(attr, &ds, 0, 0);
+        }
+        Tcl_AppendResult(interp, ds.string, 0);
+        Ns_DStringFree(&ds);
+        break;
+
+     case cmdReqSet:
+        req = (RadiusRequest*)Ns_TlsGet(&radiusTls);
+        for (int i = 2;i < objc - 1;i += 2) {
+            if (!strcmp(Tcl_GetString(objv[i]), "code")) {
+                req->reply_code = atoi(Tcl_GetString(objv[i+1]));
+            } else
+            if ((attr = RadiusAttrCreate(server, Tcl_GetString(objv[i]), -1, -1, Tcl_GetString(objv[i+1]), -1))) {
+                RadiusAttrLink(&req->reply, attr);
+            }
+        }
+        break;
+
+     case cmdReqList:
+        req = (RadiusRequest*)Ns_TlsGet(&radiusTls);
+        Ns_DStringInit(&ds);
+        Ns_DStringPrintf(&ds, "code %d id %d ipaddr %s ", req->req_code, req->req_id, ns_inet_ntoa(req->addr.sin_addr));
+        RadiusAttrPrintf(req->req, &ds, 1, 1);
+        Tcl_AppendResult(interp, ds.string, 0);
+        Ns_DStringFree(&ds);
+        break;
     }
     return TCL_OK;
 }
@@ -3129,9 +3500,9 @@ static int RadiusReqCmd(ClientData arg, Tcl_Interp *interp, int argc, CONST char
  *----------------------------------------------------------------------
  */
 
-static int RadiusProc(SOCKET sock,void *arg,int when)
+static int RadiusProc(SOCKET sock, void *arg, int when)
 {
-    int len,alen;
+    int len, alen;
     RadiusAttr *attrs;
     RadiusRequest *req;
     RadiusClient *client;
@@ -3143,24 +3514,24 @@ static int RadiusProc(SOCKET sock,void *arg,int when)
     switch(when) {
      case NS_SOCK_READ:
          alen = sizeof(struct sockaddr_in);
-         if((len = recvfrom(sock,buf,sizeof(buf),0,(struct sockaddr*)&addr,(socklen_t*)&alen)) <= 0) {
-           Ns_Log(Error,"RadiusProc: radius: recvfrom error: %s",strerror(errno));
-           return NS_TRUE;
+         if ((len = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&addr, (socklen_t*)&alen)) <= 0) {
+             Ns_Log(Error, "RadiusProc: radius: recvfrom error: %s", strerror(errno));
+             return NS_TRUE;
          }
-         if(!(client = RadiusClientFind(server,addr.sin_addr,0))) {
-           Ns_Log(Error,"RadiusRequestCreate: unknown request from %s",ns_inet_ntoa(addr.sin_addr));
-           return NS_TRUE;
+         if (!(client = RadiusClientFind(server, addr.sin_addr, 0))) {
+             Ns_Log(Error, "RadiusRequestCreate: unknown request from %s", ns_inet_ntoa(addr.sin_addr));
+             return NS_TRUE;
          }
-         if(len < ntohs(hdr->length)) {
-           Ns_Log(Error,"RadiusRequestCreate: bad packet length from %s",ns_inet_ntoa(addr.sin_addr));
-           return NS_TRUE;
+         if (len < ntohs(hdr->length)) {
+             Ns_Log(Error, "RadiusRequestCreate: bad packet length from %s", ns_inet_ntoa(addr.sin_addr));
+             return NS_TRUE;
          }
-         if(!(attrs = RadiusAttrParse(hdr,len,client->secret))) {
-           Ns_Log(Error,"RadiusRequestCreate: invalid request from %s",ns_inet_ntoa(addr.sin_addr));
-           return NS_TRUE;
+         if (!(attrs = RadiusAttrParse(server, hdr, len, client->secret))) {
+             Ns_Log(Error, "RadiusRequestCreate: invalid request from %s", ns_inet_ntoa(addr.sin_addr));
+             return NS_TRUE;
          }
          // Allocate request structure
-         req = (RadiusRequest*)ns_calloc(1,sizeof(RadiusRequest));
+         req = (RadiusRequest*)ns_calloc(1, sizeof(RadiusRequest));
          req->sock = sock;
          req->req = attrs;
          req->client = client;
@@ -3168,11 +3539,11 @@ static int RadiusProc(SOCKET sock,void *arg,int when)
          req->req_id = hdr->id;
          req->req_code = hdr->code;
          req->reply_code = RADIUS_ACCESS_REJECT;
-         memcpy(&req->addr,&addr,sizeof(addr));
-         memcpy(req->vector,hdr->vector,RADIUS_VECTOR_LEN);
+         memcpy(&req->addr, &addr, sizeof(addr));
+         memcpy(req->vector, hdr->vector, RADIUS_VECTOR_LEN);
          RadiusThread(req);
-         RadiusHeaderPack(hdr,req->req_id,req->reply_code,req->vector,req->reply,req->client->secret);
-         sendto(req->sock,buf,ntohs(hdr->length),0,(struct sockaddr*)&addr,sizeof(struct sockaddr_in));
+         RadiusHeaderPack(hdr, req->req_id, req->reply_code, req->vector, req->reply, req->client->secret);
+         sendto(req->sock, buf, ntohs(hdr->length), 0, (struct sockaddr*)&addr, sizeof(struct sockaddr_in));
          RadiusAttrFree(&req->req);
          RadiusAttrFree(&req->reply);
          ns_free(req);
@@ -3202,11 +3573,12 @@ static void RadiusThread(void *arg)
     RadiusRequest *req = (RadiusRequest *)arg;
     Tcl_Interp *interp = Ns_TclAllocateInterp(req->server->name);
 
-    Tcl_CreateCommand(interp,"ns_radiusreq",RadiusReqCmd,(ClientData)req,NULL);
-
-    if(Tcl_Eval(interp,req->server->radius.proc) != TCL_OK) Ns_TclLogError(interp);
-
+    Ns_TlsSet(&radiusTls, req);
+    if (Tcl_Eval(interp, req->server->radius.proc) != TCL_OK) {
+        Ns_TclLogError(interp);
+    }
     Ns_TclDeAllocateInterp(interp);
+    Ns_TlsSet(&radiusTls, 0);
 }
 
 /*
@@ -3214,7 +3586,7 @@ static void RadiusThread(void *arg)
  *
  * RadiusInit --
  *
- *	Initializes RADIUS subsystem, default dictionary
+ *	Initializes RADIUS subsystem,  default dictionary
  *
  * Results:
  *	None
@@ -3226,60 +3598,60 @@ static void RadiusThread(void *arg)
  */
 
 
-static void RadiusInit()
+static void RadiusInit(Server *server)
 {
-   RadiusDictAdd("User-Name",1,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("User-Password",2,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("CHAP-Password",3,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("NAS-IP-Address",4,0,RADIUS_TYPE_IPADDR);
-   RadiusDictAdd("NAS-Port",5,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Service-Type",6,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Framed-Protocol",7,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Framed-IP-Address",8,0,RADIUS_TYPE_IPADDR);
-   RadiusDictAdd("Framed-IP-Netmask",9,0,RADIUS_TYPE_IPADDR);
-   RadiusDictAdd("Framed-Routing",10,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Filter-Id",11,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Framed-MTU",12,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Framed-Compression",13,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Login-IP-Host", 14,0,RADIUS_TYPE_IPADDR);
-   RadiusDictAdd("Login-Service", 15,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Login-Port",16,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Old-Password",17,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Reply-Message",18,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Login-Callback-Number",19,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Framed-Callback-Id",20,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Framed-Route",22,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Framed-IPX-Network",23,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("State",24,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Class",25,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Vendor-Specific",26,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Session-Timeout",27,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Idle-Timeout",28,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Termination-Action",29,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Called-Station-Id",30,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Calling-Station-Id",31,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("NAS-Identifier",32,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Proxy-State",33,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Login-LAT-Service",34,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Login-LAT-Node",35,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Login-LAT-Group",36,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Framed-AppleTalk-Link",37,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Framed-AppleTalk-Network",38,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Framed-AppleTalk-Zone",39,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("CHAP-Challenge",60,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("NAS-Port-Type",61,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Port-Limit",62,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Status-Type",40,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Delay-Time",41,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Input-Octets",42,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Output-Octets",43,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Session-Id",44,0,RADIUS_TYPE_STRING);
-   RadiusDictAdd("Acct-Authentic",45,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Session-Time",46,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Input-Packets",47,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Output-Packets",48,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("Acct-Terminate-Cause",49,0,RADIUS_TYPE_INTEGER);
-   RadiusDictAdd("User-Id",99,0,RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "User-Name", 1, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "User-Password", 2, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "CHAP-Password", 3, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "NAS-IP-Address", 4, 0, RADIUS_TYPE_IPADDR);
+   RadiusDictAdd(server, "NAS-Port", 5, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Service-Type", 6, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Framed-Protocol", 7, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Framed-IP-Address", 8, 0, RADIUS_TYPE_IPADDR);
+   RadiusDictAdd(server, "Framed-IP-Netmask", 9, 0, RADIUS_TYPE_IPADDR);
+   RadiusDictAdd(server, "Framed-Routing", 10, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Filter-Id", 11, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Framed-MTU", 12, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Framed-Compression", 13, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Login-IP-Host",  14, 0, RADIUS_TYPE_IPADDR);
+   RadiusDictAdd(server, "Login-Service",  15, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Login-Port", 16, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Old-Password", 17, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Reply-Message", 18, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Login-Callback-Number", 19, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Framed-Callback-Id", 20, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Framed-Route", 22, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Framed-IPX-Network", 23, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "State", 24, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Class", 25, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Vendor-Specific", 26, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Session-Timeout", 27, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Idle-Timeout", 28, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Termination-Action", 29, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Called-Station-Id", 30, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Calling-Station-Id", 31, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "NAS-Identifier", 32, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Proxy-State", 33, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Login-LAT-Service", 34, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Login-LAT-Node", 35, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Login-LAT-Group", 36, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Framed-AppleTalk-Link", 37, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Framed-AppleTalk-Network", 38, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Framed-AppleTalk-Zone", 39, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "CHAP-Challenge", 60, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "NAS-Port-Type", 61, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Port-Limit", 62, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Status-Type", 40, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Delay-Time", 41, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Input-Octets", 42, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Output-Octets", 43, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Session-Id", 44, 0, RADIUS_TYPE_STRING);
+   RadiusDictAdd(server, "Acct-Authentic", 45, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Session-Time", 46, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Input-Packets", 47, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Output-Packets", 48, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "Acct-Terminate-Cause", 49, 0, RADIUS_TYPE_INTEGER);
+   RadiusDictAdd(server, "User-Id", 99, 0, RADIUS_TYPE_STRING);
 }
 
 /*
@@ -3298,83 +3670,83 @@ static void RadiusInit()
  *----------------------------------------------------------------------
  */
 static int
-UdpCmd(ClientData arg, Tcl_Interp *interp,int objc,Tcl_Obj *CONST objv[])
+UdpCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
     fd_set fds;
     char buf[16384];
     struct timeval tv;
     struct sockaddr_in sa;
     int salen = sizeof(sa);
-    char *address = 0, *data = 0;
-    int i, sock, len, port, timeout = 5, retries = 1, noreply = 0;
+    char *address = 0,  *data = 0;
+    int i,  sock,  len,  port,  timeout = 5,  retries = 1,  noreply = 0;
         
     Ns_ObjvSpec opts[] = {
-        {"-timeout", Ns_ObjvInt,   &timeout, NULL},
-        {"-retries", Ns_ObjvInt,   &retries, NULL},
-        {"-noreply", Ns_ObjvInt,   &noreply, NULL},
-        {"--",      Ns_ObjvBreak,  NULL,    NULL},
-        {NULL, NULL, NULL, NULL}
+        {"-timeout",  Ns_ObjvInt,    &timeout,  NULL}, 
+        {"-retries",  Ns_ObjvInt,    &retries,  NULL}, 
+        {"-noreply",  Ns_ObjvInt,    &noreply,  NULL}, 
+        {"--",       Ns_ObjvBreak,   NULL,     NULL}, 
+        {NULL,  NULL,  NULL,  NULL}
     };
     Ns_ObjvSpec args[] = {
-        {"address",  Ns_ObjvString, &address, NULL},
-        {"port",  Ns_ObjvInt, &port, NULL},
-        {"data",  Ns_ObjvString, &data, &len},
-        {NULL, NULL, NULL, NULL}
+        {"address",   Ns_ObjvString,  &address,  NULL}, 
+        {"port",   Ns_ObjvInt,  &port,  NULL}, 
+        {"data",   Ns_ObjvString,  &data,  &len}, 
+        {NULL,  NULL,  NULL,  NULL}
     };
 
-    if (Ns_ParseObjv(opts, args, interp, 1, objc, objv) != NS_OK) {
-      return TCL_ERROR;
-    }
-    if (Ns_GetSockAddr(&sa, address, port) != NS_OK) {
-        sprintf(buf, "%s:%d", address, port);
-        Tcl_AppendResult(interp, "invalid address ", address, 0);
+    if (Ns_ParseObjv(opts,  args,  interp,  1,  objc,  objv) != NS_OK) {
         return TCL_ERROR;
     }
-    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (Ns_GetSockAddr(&sa,  address,  port) != NS_OK) {
+        sprintf(buf,  "%s:%d",  address,  port);
+        Tcl_AppendResult(interp,  "invalid address ",  address,  0);
+        return TCL_ERROR;
+    }
+    sock = socket(AF_INET,  SOCK_DGRAM,  0);
     if (sock < 0) {
-        Tcl_AppendResult(interp, "socket error ", strerror(errno), 0);
+        Tcl_AppendResult(interp,  "socket error ",  strerror(errno),  0);
         return TCL_ERROR;
     }
     /* To support brodcasting addresses */
     i = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &i, sizeof(int));
+    setsockopt(sock,  SOL_SOCKET,  SO_BROADCAST,  &i,  sizeof(int));
 
 resend:
-    if (sendto(sock, data, len, 0,(struct sockaddr*)&sa,sizeof(sa)) < 0) {
-        Tcl_AppendResult(interp, "sendto error ", strerror(errno), 0);
+    if (sendto(sock,  data,  len,  0, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        Tcl_AppendResult(interp,  "sendto error ",  strerror(errno),  0);
         return TCL_ERROR;
     }
     if (noreply) {
         close(sock);
         return TCL_OK;
     }
-    memset(buf,0,sizeof(buf));
+    memset(buf, 0, sizeof(buf));
     Ns_SockSetNonBlocking(sock);
 again:
     FD_ZERO(&fds);
-    FD_SET(sock,&fds);
+    FD_SET(sock, &fds);
     tv.tv_sec = timeout;
     tv.tv_usec = 0;
-    len = select(sock+1, &fds, 0, 0, &tv);
+    len = select(sock+1,  &fds,  0,  0,  &tv);
     switch (len) {
      case -1:
          if (errno == EINTR || errno == EINPROGRESS || errno == EAGAIN) {
              goto again;
          }
-         Tcl_AppendResult(interp, "select error ", strerror(errno), 0);
+         Tcl_AppendResult(interp,  "select error ",  strerror(errno),  0);
          close(sock);
          return TCL_ERROR;
 
      case 0:
-         if(--retries > 0) goto resend;
-         Tcl_AppendResult(interp, "timeout", 0);
+         if (--retries > 0) goto resend;
+         Tcl_AppendResult(interp,  "timeout",  0);
          close(sock);
          return TCL_ERROR;
     }
-    if (FD_ISSET(sock, &fds)) {
-        len = recvfrom(sock, buf, sizeof(buf)-1, 0, (struct sockaddr*)&sa, (socklen_t*)&salen);
+    if (FD_ISSET(sock,  &fds)) {
+        len = recvfrom(sock,  buf,  sizeof(buf)-1,  0,  (struct sockaddr*)&sa,  (socklen_t*)&salen);
         if (len > 0) {
-            Tcl_AppendResult(interp, buf, 0);
+            Tcl_AppendResult(interp,  buf,  0);
         }
     }
     close(sock);

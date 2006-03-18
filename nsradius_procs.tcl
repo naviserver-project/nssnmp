@@ -18,6 +18,9 @@ proc RadiusServer {} {
             }
           }
           crypt-password {
+            if { [ns_crypt $passwd $val] == $val } {
+              set ok 1
+            }
           }
          }
        }

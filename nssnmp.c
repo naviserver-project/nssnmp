@@ -446,6 +446,7 @@ typedef struct _server {
      int enabled;
      int auth_sock;
      int acct_sock;
+     short errors;
      Ns_Mutex userMutex;
      Ns_Mutex clientMutex;
      Ns_Mutex requestMutex;
@@ -462,6 +463,7 @@ typedef struct _server {
      int enabled;
      int udp_sock;
      int unix_sock;
+     short errors;
      Ns_DString buffer;
    } syslog;
 } Server;
@@ -3125,13 +3127,16 @@ static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CON
         cmdSend, cmdReqGet, cmdReqSet, cmdReqList,
         cmdDictList, cmdDictGet, cmdDictDel, cmdDictAdd, cmdDictValue, cmdDictLabel,
         cmdClientAdd, cmdClientList, cmdClientDel, cmdClientGet,
-        cmdUserAdd, cmdUserFind, cmdUserDel, cmdUserList, cmdUserAttrFind
+        cmdUserAdd, cmdUserFind, cmdUserDel, cmdUserList, cmdUserAttrFind,
+        cmdReset
     };
     static const char *sCmd[] = {
         "send", "reqget", "reqset", "reqlist",
         "dictlist", "dictget", "dictdel", "dictadd", "dictvalue", "dictlabel",
         "clientadd", "clientlist", "clientdel", "clientget",
-        "useradd", "userfind", "userdel", "userlist", "userattrfind", 0
+        "useradd", "userfind", "userdel", "userlist", "userattrfind",
+        "reset",
+        0
     };
     int cmd;
 
@@ -3498,6 +3503,10 @@ again:
         Tcl_AppendResult(interp, ds.string, 0);
         Ns_DStringFree(&ds);
         break;
+
+     case cmdReset:
+        server->radius.errors = 0;
+        break;
     }
     return TCL_OK;
 }
@@ -3533,19 +3542,27 @@ static int RadiusProc(SOCKET sock, void *arg, int when)
      case NS_SOCK_READ:
          alen = sizeof(struct sockaddr_in);
          if ((len = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&addr, (socklen_t*)&alen)) <= 0) {
-             Ns_Log(Error, "RadiusProc: radius: recvfrom error: %s", strerror(errno));
+             if (server->radius.errors >= 0 && server->radius.errors++ < 10) {
+                 Ns_Log(Error, "RadiusProc: radius: recvfrom error: %s", strerror(errno));
+             }
              return NS_TRUE;
          }
          if (!(client = RadiusClientFind(server, addr.sin_addr, 0))) {
-             Ns_Log(Error, "RadiusRequestCreate: unknown request from %s", ns_inet_ntoa(addr.sin_addr));
+             if (server->radius.errors >= 0 && server->radius.errors++ < 100) {
+                 Ns_Log(Error, "RadiusRequestCreate: unknown request from %s", ns_inet_ntoa(addr.sin_addr));
+             }
              return NS_TRUE;
          }
          if (len < ntohs(hdr->length)) {
-             Ns_Log(Error, "RadiusRequestCreate: bad packet length from %s", ns_inet_ntoa(addr.sin_addr));
+             if (server->radius.errors >= 0 && server->radius.errors++ < 100) {
+                 Ns_Log(Error, "RadiusRequestCreate: bad packet length from %s", ns_inet_ntoa(addr.sin_addr));
+             }
              return NS_TRUE;
          }
          if (!(attrs = RadiusAttrParse(server, hdr, len, client->secret))) {
-             Ns_Log(Error, "RadiusRequestCreate: invalid request from %s", ns_inet_ntoa(addr.sin_addr));
+             if (server->radius.errors >= 0 && server->radius.errors++ < 100) {
+                 Ns_Log(Error, "RadiusRequestCreate: invalid request from %s", ns_inet_ntoa(addr.sin_addr));
+             }
              return NS_TRUE;
          }
          // Allocate request structure
@@ -3703,12 +3720,16 @@ static int SyslogProc(SOCKET sock, void *arg, int why)
 
     if (sock == server->syslog.udp_sock) {
         if ((len = recvfrom(sock, buf, sizeof(buf) - 1, 0, (struct sockaddr*)&sa, &salen)) <= 0) {
-            Ns_Log(Error, "SyslogProc: %d: recvfrom error: %s", sock, strerror(errno));
+            if (server->syslog.errors >= 0 && server->syslog.errors++ < 10) {
+                Ns_Log(Error, "SyslogProc: %d: recvfrom error: %s", sock, strerror(errno));
+            }
             return NS_TRUE;
         }
     } else {
        if ((len = recv(sock, buf, sizeof(buf) - 1, 0)) <= 0) {
-           Ns_Log(Error, "SyslogProc: %d: recv error: %s", sock, strerror(errno));
+           if (server->syslog.errors >= 0 && server->syslog.errors++ < 10) {
+               Ns_Log(Error, "SyslogProc: %d: recv error: %s", sock, strerror(errno));
+           }
            return NS_TRUE;
        }
        sa.sin_addr.s_addr = inet_addr("127.0.0.1");

@@ -1,3 +1,7 @@
+2006-03-21 Vlad Seryakov vlad@crystalballinc.com
+
+	* Added syslog server support
+        
 2006-03-17 Vlad Seryakov vlad@crystalballinc.com
 
 	* Removed ns_udp, it is handled by ns_udp module now

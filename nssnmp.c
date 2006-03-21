@@ -388,7 +388,7 @@ typedef struct _radiusClient {
 
 // User record
 typedef struct _radiusUser {
-   RadiusAttr *check;
+   RadiusAttr *config;
    RadiusAttr *reply;
 } RadiusUser;
 
@@ -2210,6 +2210,9 @@ static void FormatIntTC(Tcl_Interp *interp, char *bytes, char *fmt)
  * will fill a supplied 16-byte array with the digest.
  *
  * $Log$
+ * Revision 1.17  2006/03/21 00:33:46  seryakov
+ * minor additions to RADIUS server
+ *
  * Revision 1.16  2006/03/18 18:05:41  seryakov
  * modules cleanups and updates
  *
@@ -3098,13 +3101,34 @@ static RadiusUser *RadiusUserFind(Server *server, char *user, Ns_DString *ds)
     if (entry) {
         rec = (RadiusUser*)Tcl_GetHashValue(entry);
         Ns_DStringAppend(ds, "{");
-        RadiusAttrPrintf(rec->check, ds, 1, 1);
+        RadiusAttrPrintf(rec->config, ds, 1, 1);
         Ns_DStringAppend(ds, "} {");
         RadiusAttrPrintf(rec->reply, ds, 1, 1);
         Ns_DStringAppend(ds, "} ");
     }
     Ns_MutexUnlock(&server->radius.userMutex);
     return rec;
+}
+
+static int RadiusUserAttrFind(Server *server, char *user, Ns_DString *ds, char *name, int reply)
+{
+    int rc = 0;
+    RadiusUser *rec;
+    RadiusAttr *attr;
+    Tcl_HashEntry *entry;
+
+    Ns_MutexLock(&server->radius.userMutex);
+    entry = Tcl_FindHashEntry(&server->radius.userList, user);
+    if (entry) {
+        rec = (RadiusUser*)Tcl_GetHashValue(entry);
+        attr = RadiusAttrFind(reply ? rec->reply : rec->config, name, -1, -1);
+        if (attr) {
+            RadiusAttrPrintf(attr, ds, 0, 0);
+            rc = 1;
+        }
+    }
+    Ns_MutexUnlock(&server->radius.userMutex);
+    return rc;
 }
 
 static void RadiusUserList(Server *server, char *user, Ns_DString *ds)
@@ -3119,7 +3143,7 @@ static void RadiusUserList(Server *server, char *user, Ns_DString *ds)
       if (!user || Tcl_StringCaseMatch(Tcl_GetHashKey(&server->radius.userList, entry), user, 1)) {
           rec = (RadiusUser*)Tcl_GetHashValue(entry);
           Ns_DStringPrintf(ds, "%s {", Tcl_GetHashKey(&server->radius.userList, entry));
-          RadiusAttrPrintf(rec->check, ds, 1, 1);
+          RadiusAttrPrintf(rec->config, ds, 1, 1);
           Ns_DStringAppend(ds, "} {");
           RadiusAttrPrintf(rec->reply, ds, 1, 1);
           Ns_DStringAppend(ds, "} ");
@@ -3169,13 +3193,13 @@ static int RadiusCmd(ClientData arg,  Tcl_Interp *interp, int objc, Tcl_Obj *CON
         cmdSend, cmdReqGet, cmdReqSet, cmdReqList,
         cmdDictList, cmdDictGet, cmdDictDel, cmdDictAdd, cmdDictValue, cmdDictLabel,
         cmdClientAdd, cmdClientList, cmdClientDel, cmdClientGet,
-        cmdUserAdd, cmdUserFind, cmdUserDel, cmdUserList
+        cmdUserAdd, cmdUserFind, cmdUserDel, cmdUserList, cmdUserAttrFind
     };
     static const char *sCmd[] = {
         "send", "reqget", "reqset", "reqlist",
         "dictlist", "dictget", "dictdel", "dictadd", "dictvalue", "dictlabel",
         "clientadd", "clientlist", "clientdel", "clientget",
-        "useradd", "userfind", "userdel", "userlist", 0
+        "useradd", "userfind", "userdel", "userlist", "userattrfind", 0
     };
     int cmd;
 
@@ -3428,8 +3452,24 @@ again:
         break;
 
      case cmdUserFind:
+        if (objc < 3) {
+            Tcl_WrongNumArgs(interp, 2, objv, "name");
+            return TCL_ERROR;
+        }
         Ns_DStringInit(&ds);
         if (RadiusUserFind(server, Tcl_GetString(objv[2]), &ds)) {
+            Tcl_AppendResult(interp, ds.string, 0);
+        }
+        Ns_DStringFree(&ds);
+        break;
+
+     case cmdUserAttrFind:
+        if (objc < 4) {
+            Tcl_WrongNumArgs(interp, 2, objv, "name attr ?inreply?");
+            return TCL_ERROR;
+        }
+        Ns_DStringInit(&ds);
+        if (RadiusUserAttrFind(server, Tcl_GetString(objv[2]), &ds, Tcl_GetString(objv[3]), objc > 4)) {
             Tcl_AppendResult(interp, ds.string, 0);
         }
         Ns_DStringFree(&ds);
@@ -3448,7 +3488,7 @@ again:
                 if (Tcl_ListObjIndex(0, objv[3], i, &key) == TCL_OK &&
                     Tcl_ListObjIndex(0, objv[3], i+1, &val) == TCL_OK && key && val) {
                     if ((attr = RadiusAttrCreate(server, Tcl_GetString(key), -1, -1, Tcl_GetString(val), -1))) {
-                        RadiusAttrLink(&user->check, attr);
+                        RadiusAttrLink(&user->config, attr);
                     }
                 }
             }

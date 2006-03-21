@@ -3749,6 +3749,14 @@ static int SyslogProc(SOCKET sock, void *arg, int why)
     }
     iFacility = priority / 8;
     iSeverity = priority - iFacility * 8;
+    /* Parse timestamp: Mon dd hh:mm:ss */
+    while (*ptr && !isspace(*ptr++)) ;
+    while (*ptr && !isspace(*ptr++)) ;
+    while (*ptr && !isspace(*ptr++)) ;
+    /* Bad line, ignore it */
+    if (!*ptr) {
+        return NS_TRUE;
+    }
     /* Format the message*/
     switch (iFacility) {
      case 0:

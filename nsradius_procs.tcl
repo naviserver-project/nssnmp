@@ -8,10 +8,15 @@ namespace eval radius {
 
 ns_schedule_proc -once 0 radius::init
 
+# Global RADIUS initialization
 proc radius::init {} {
 
-    radius:dictinit
+    radius::dictinit
+    # Load local system users
     radius::loadusers
+    # Load users file
+    set config [file dirname [ns_info config]]/radius.tcl
+    if { [file exists $config] } { source $config }
 }
 
 # RADIUS server handler
@@ -32,13 +37,24 @@ proc radius::server { args } {
        foreach { key val } [lindex $user 0] {
          switch -- $key {
           user-password {
+            # Clear text password
             if { $passwd == $val } {
               set ok 1
             }
           }
+          
           crypt-password {
+            # Encrypted password
             if { [ns_crypt $passwd $val] == $val } {
               set ok 1
+            }
+          }
+          
+          auth-profile {
+            # Take attributes from specified profile user
+            set profile [ns_radius userfind $val]
+            if { $profile != "" } {
+              eval ns_radius reqset [lindex $profile 1]
             }
           }
          }
@@ -68,7 +84,7 @@ proc radius::loadusers {} {
       set line [split [gets $fd] :]
       # Keep only non empty passwords
       if { [string index [lindex $line 1] 0] == {$} } {
-        ns_radius useradd [lindex $line 0] "Crypt-Password [lindex $line 1] Auth-Profile System"
+        ns_radius useradd [lindex $line 0] "Crypt-Password [lindex $line 1] Auth-Profile System-Profile"
       }
     }
     close $fd

@@ -1,11 +1,13 @@
 SNMP Module for NaviServer 4.x
-Release 1.14
+Release 2.0
 vlad@crystalballinc.com
 
 This is NaviServer module that implements SNMP v1,v2c and some
-primitive MIB support, ICMP, RADIUS protocols. It is based on SNMP++
-library from http:://www.agentpp.com. It allows to use NaviServer as 
-SNMP trap server and build SNMP monitoring packages.
+primitive MIB support, ICMP, RADIUS and Syslog protocols. 
+It is based on SNMP++ library from http:://www.agentpp.com. 
+It allows to use NaviServer as SNMP trap server and build 
+SNMP monitoring packages and act as RADIUS authentication server and
+syslog server.
 
 /*--------------------------------------------------------------------*/
 
@@ -19,17 +21,26 @@ Configuring
 Here is an nsd.tcl excerpt for configuring the SNMP module:
 
 ns_section      ns/server/${servername}/module/nssnmp
-ns_param	community	public
-ns_param	port		161
-ns_param	timeout		2
-ns_param	retries		2
-ns_param	version		1
-ns_param	bulk		20
-ns_param	trap_port	162
-ns_param	trap_proc	tcl_trap_handler
-ns_param	trap_address	127.0.0.1
-ns_param	idle_timeout	600
-ns_param	gc_interval	600
+ns_param	community	 public
+ns_param	port		 161
+ns_param	timeout		 2
+ns_param	retries		 2
+ns_param	version		 1
+ns_param	bulk		 20
+ns_param	trap_port	 162
+ns_param	trap_proc	 tcl_trap_handler
+ns_param	trap_address	 127.0.0.1
+ns_param	idle_timeout	 600
+ns_param	gc_interval	 600
+ns_param	enablesyslog	 false
+ns_param	syslog_port	 514
+ns_param	syslog_proc	 tcl_syslog_handler
+ns_param	syslog_address	 0.0.0.0
+ns_param	enableradius	 false
+ns_param	radius_auth_port 1645
+ns_param	radius_auth_port 1646
+ns_param	radius_proc	 tcl_trap_handler
+ns_param	radius_address	 127.0.0.1
 
 Timeout is in seconds, version 1 is 0, version 2c is 1.
 In order to enable trap agent, trap_proc should be specified.

@@ -161,6 +161,7 @@ extern "C" {
 #include <errno.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/syslog.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <netinet/in_systm.h>
@@ -173,7 +174,7 @@ extern "C" {
 
 #include "snmp_pp/snmp_pp.h"
 
-#define SNMP_VERSION  "1.14"
+#define SNMP_VERSION  "2.0"
 
 typedef struct _icmpPort {
   struct _icmpPort *next,*prev;
@@ -251,6 +252,22 @@ typedef struct _mibEntry {
 
 // MD5 implementation
 #define MD5_DIGEST_CHARS         16
+
+#ifdef sun
+#define HIGHFIRST
+#endif
+
+/* The four core functions - F1 is optimized somewhat */
+
+/* #define F1(x,  y,  z) (x & y | ~x & z) */
+#define F1(x,  y,  z) (z ^ (x & (y ^ z)))
+#define F2(x,  y,  z) F1(z,  x,  y)
+#define F3(x,  y,  z) (x ^ y ^ z)
+#define F4(x,  y,  z) (y ^ (x | ~z))
+
+/* This is the central step in the MD5 algorithm. */
+#define MD5STEP(f,  w,  x,  y,  z,  data,  s) \
+	( w += f(x,  y,  z) + data,   w = w<<s | w>>(32-s),   w += x )
 
 struct MD5Context {
     unsigned int buf[4];
@@ -423,9 +440,12 @@ typedef struct _server {
    } trap;
    struct {
      char *proc;
+     char *address;
      int auth_port;
      int acct_port;
-     char *address;
+     int enabled;
+     int auth_sock;
+     int acct_sock;
      Ns_Mutex userMutex;
      Ns_Mutex clientMutex;
      Ns_Mutex requestMutex;
@@ -434,6 +454,16 @@ typedef struct _server {
      Ns_Mutex dictMutex;
      RadiusDict *dictList;
    } radius;
+   struct {
+     char *proc;
+     char *path;
+     char *address;
+     int port;
+     int enabled;
+     int udp_sock;
+     int unix_sock;
+     Ns_DString buffer;
+   } syslog;
 } Server;
 
 class TrapContext {
@@ -469,8 +499,9 @@ static Ns_ThreadProc RadiusThread;
 static Ns_SockProc TrapProc;
 static Ns_ThreadProc TrapThread;
 
+static Ns_SockProc SyslogProc;
+
 extern int receive_snmp_notification(int sock, Snmp &snmp_session,Pdu &pdu, SnmpTarget **target);
-static int UdpListen(char *address,int port);
 static int SnmpCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
 static int TrapCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
 static int MibCmd(ClientData arg, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[]);
@@ -490,6 +521,8 @@ static char *PduTypeStr(int type);
 static char *SyntaxStr(int type);
 static int SyntaxValid(int type);
 static void RadiusInit(Server *server);
+static void byteReverse(unsigned char *buf,  unsigned len);
+static void MD5Transform(unsigned int buf[4],  unsigned int const in[16]);
 
 extern "C" {
 
@@ -524,7 +557,7 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     char *path;
     SOCKET sock;
     int status;
-    Server *serverPtr;
+    Server *srvPtr;
     static int initialized = 0;
 
     if (!initialized) {
@@ -536,122 +569,166 @@ NS_EXPORT int Ns_ModuleInit(char *server, char *module)
     Ns_Log(Notice, "nssnmp module version %s server: %s", SNMP_VERSION, server);
 
     path = Ns_ConfigGetPath(server, module, NULL);
-    serverPtr = (Server*)ns_calloc(1,sizeof(Server));
-    serverPtr->name = server;
-    Tcl_InitHashTable(&serverPtr->mib, TCL_STRING_KEYS);
-    Tcl_InitHashTable(&serverPtr->radius. userList, TCL_STRING_KEYS);
-    if (!Ns_ConfigGetInt(path,"debug", &serverPtr->debug)) {
-        serverPtr->debug = 0;
+    srvPtr = (Server*)ns_calloc(1,sizeof(Server));
+    srvPtr->name = server;
+    Tcl_InitHashTable(&srvPtr->mib, TCL_STRING_KEYS);
+    Tcl_InitHashTable(&srvPtr->radius. userList, TCL_STRING_KEYS);
+    if (!Ns_ConfigGetInt(path,"debug", &srvPtr->debug)) {
+        srvPtr->debug = 0;
     }
-    if (!Ns_ConfigGetInt(path, "idle_timeout", &serverPtr->idle_timeout)) {
-        serverPtr->idle_timeout = 600;
+    if (!Ns_ConfigGetInt(path, "idle_timeout", &srvPtr->idle_timeout)) {
+        srvPtr->idle_timeout = 600;
     }
-    if (!Ns_ConfigGetInt(path, "gc_interval", &serverPtr->gc_interval)) {
-        serverPtr->gc_interval = 600;
+    if (!Ns_ConfigGetInt(path, "gc_interval", &srvPtr->gc_interval)) {
+        srvPtr->gc_interval = 600;
     }
-    if (!(serverPtr->community = Ns_ConfigGetValue(path, "community"))) {
-        serverPtr->community = "public";
+    if (!(srvPtr->community = Ns_ConfigGetValue(path, "community"))) {
+        srvPtr->community = "public";
     }
-    if (!(serverPtr->writecommunity = Ns_ConfigGetValue(path, "writecommunity"))) {
-        serverPtr->writecommunity = "private";
+    if (!(srvPtr->writecommunity = Ns_ConfigGetValue(path, "writecommunity"))) {
+        srvPtr->writecommunity = "private";
     }
-    if (!Ns_ConfigGetInt(path, "port", &serverPtr->port)) {
-        serverPtr->port = 161;
+    if (!Ns_ConfigGetInt(path, "port", &srvPtr->port)) {
+        srvPtr->port = 161;
     }
-    if (!Ns_ConfigGetInt(path, "timeout", &serverPtr->timeout)) {
-        serverPtr->timeout = 2;
+    if (!Ns_ConfigGetInt(path, "timeout", &srvPtr->timeout)) {
+        srvPtr->timeout = 2;
     }
-    if (!Ns_ConfigGetInt(path, "retries", &serverPtr->retries)) {
-        serverPtr->retries = 2;
+    if (!Ns_ConfigGetInt(path, "retries", &srvPtr->retries)) {
+        srvPtr->retries = 2;
     }
-    if (!Ns_ConfigGetInt(path, "version", &serverPtr->version)) {
-        serverPtr->version = 2;
+    if (!Ns_ConfigGetInt(path, "version", &srvPtr->version)) {
+        srvPtr->version = 2;
     }
-    if (!Ns_ConfigGetInt(path, "bulk", &serverPtr->bulk)) {
-        serverPtr->bulk = 10;
+    if (!Ns_ConfigGetInt(path, "bulk", &srvPtr->bulk)) {
+        srvPtr->bulk = 10;
     }
-    if (!Ns_ConfigGetInt(path, "trap_port", &serverPtr->trap.port)) {
-        serverPtr->trap.port = 162;
+
+    srvPtr->trap.proc = Ns_ConfigGetValue(path,"trap_proc");
+    if (!Ns_ConfigGetInt(path, "trap_port", &srvPtr->trap.port)) {
+        srvPtr->trap.port = 162;
     }
-    if (!(serverPtr->trap.address = Ns_ConfigGetValue(path, "trap_address"))) {
-        serverPtr->trap.address = "0.0.0.0";
+    if (!(srvPtr->trap.address = Ns_ConfigGetValue(path, "trap_address"))) {
+        srvPtr->trap.address = "0.0.0.0";
     }
-    serverPtr->trap.proc = Ns_ConfigGetValue(path,"trap_proc");
-    if (!Ns_ConfigGetInt(path, "radius_auth_port", &serverPtr->radius.auth_port)) {
-        serverPtr->radius.auth_port = RADIUS_AUTH_PORT;
+
+    srvPtr->radius.proc = Ns_ConfigGetValue(path, "radius_proc");
+    if (!Ns_ConfigGetInt(path, "radius_auth_port", &srvPtr->radius.auth_port)) {
+        srvPtr->radius.auth_port = RADIUS_AUTH_PORT;
     }
-    if (!Ns_ConfigGetInt(path, "radius_acct_port", &serverPtr->radius.acct_port)) {
-        serverPtr->radius.acct_port = RADIUS_ACCT_PORT;
+    if (!Ns_ConfigGetInt(path, "radius_acct_port", &srvPtr->radius.acct_port)) {
+        srvPtr->radius.acct_port = RADIUS_ACCT_PORT;
     }
-    if (!(serverPtr->radius.address = Ns_ConfigGetValue(path, "radius_address"))) {
-        serverPtr->radius.address = "0.0.0.0";
+    if (!(srvPtr->radius.address = Ns_ConfigGetValue(path, "radius_address"))) {
+        srvPtr->radius.address = "0.0.0.0";
     }
-    serverPtr->radius.proc = Ns_ConfigGetValue(path, "radius_proc");
+
+    srvPtr->syslog.proc = Ns_ConfigGetValue(path, "syslog_proc");
+    srvPtr->syslog.address = Ns_ConfigGetValue(path, "syslog_address");
+    srvPtr->syslog.port = Ns_ConfigIntRange(path, "syslog_port", 514, 1, 65535);
+    if (!(srvPtr->syslog.path = Ns_ConfigGetValue(path, "syslog_path"))) {
+        srvPtr->syslog.path = "/dev/log";
+    }
 
     // Initialize ICMP system
-    if (Ns_ConfigGetInt(path, "icmp_ports", &serverPtr->icmp.count) > 0) {
+    if (Ns_ConfigGetInt(path, "icmp_ports", &srvPtr->icmp.count) > 0) {
         IcmpPort *icmp;
-        for (int i = 0; i < serverPtr->icmp.count; i++) {
+        for (int i = 0; i < srvPtr->icmp.count; i++) {
           if ((sock = Ns_SockListenRaw(IPPROTO_ICMP)) == -1) {
               Ns_Log(Error,"nssnmp: couldn't create icmp socket: %s", strerror(errno));
               return NS_ERROR;
           }
           icmp = (IcmpPort*)ns_calloc(1,sizeof(IcmpPort));
           icmp->fd = sock;
-          icmp->next = serverPtr->icmp.ports;
+          icmp->next = srvPtr->icmp.ports;
           if (icmp->next) icmp->next->prev = icmp;
-          serverPtr->icmp.ports = icmp;
+          srvPtr->icmp.ports = icmp;
         }
-        Ns_Log(Notice,"nssnmp: allocated %d ICMP ports", serverPtr->icmp.count);
+        Ns_Log(Notice,"nssnmp: allocated %d ICMP ports", srvPtr->icmp.count);
     }
 
     /* Configure SNMP trap listener */
-    if (serverPtr->trap.proc) {
-        serverPtr->trap.snmp = new Snmp(status);
+    if (srvPtr->trap.proc) {
+        srvPtr->trap.snmp = new Snmp(status);
         if (status != SNMP_CLASS_SUCCESS) {
-            Ns_Log(Error,"nssnmp: snmp initialization failed: %s", serverPtr->trap.snmp->error_msg(status));
+            Ns_Log(Error,"nssnmp: snmp initialization failed: %s", srvPtr->trap.snmp->error_msg(status));
             return NS_ERROR;
         }
-        if ((sock = UdpListen(serverPtr->trap.address, serverPtr->trap.port)) != -1) {
-          Ns_SockCallback(sock, TrapProc, serverPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
-          Ns_Log(Notice,"nssnmp: listening on %s:%d by %s",
-                        serverPtr->trap.address?serverPtr->trap.address:"0.0.0.0",
-                        serverPtr->trap.port,
-                        serverPtr->trap.proc);
+        if ((sock = Ns_SockListenUdp(srvPtr->trap.address, srvPtr->trap.port)) == -1) {
+            Ns_Log(Error,"nssnmp: couldn't create socket: %s:%d: %s", srvPtr->trap.address, srvPtr->trap.port, strerror(errno));
+        } else {
+            Ns_SockCallback(sock, TrapProc, srvPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
+            Ns_Log(Notice,"nssnmp: listening on %s:%d by %s",
+                          srvPtr->trap.address?srvPtr->trap.address:"0.0.0.0",
+                          srvPtr->trap.port,
+                          srvPtr->trap.proc);
         }
     }
 
     /* Configure RADIUS server */
-    if (serverPtr->radius.proc) {
-        if ((sock = UdpListen(serverPtr->radius.address, serverPtr->radius.auth_port)) != -1) {
-            Ns_SockCallback(sock, RadiusProc, serverPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
+    if (Ns_ConfigGetBool(path, "enableradius", &srvPtr->radius.enabled) && srvPtr->radius.proc) {
+        if ((sock = Ns_SockListenUdp(srvPtr->radius.address, srvPtr->radius.auth_port)) == -1) {
+            Ns_Log(Error,"nssnmp: couldn't create socket: %s:%d: %s", srvPtr->radius.address, srvPtr->radius.auth_port, strerror(errno));
+        } else {
+            srvPtr->radius.auth_sock = sock;
+            Ns_SockCallback(sock, RadiusProc, srvPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
             Ns_Log(Notice,"nssnmp: radius: listening on %s:%d by %s",
-                          serverPtr->radius.address?serverPtr->radius.address:"0.0.0.0",
-                          serverPtr->radius.auth_port,
-                          serverPtr->radius.proc);
+                          srvPtr->radius.address?srvPtr->radius.address:"0.0.0.0",
+                          srvPtr->radius.auth_port,
+                          srvPtr->radius.proc);
         }
-        if ((sock = UdpListen(serverPtr->radius.address, serverPtr->radius.acct_port)) != -1) {
-            Ns_SockCallback(sock, RadiusProc, serverPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
+        if ((sock = Ns_SockListenUdp(srvPtr->radius.address, srvPtr->radius.acct_port)) == -1) {
+            Ns_Log(Error,"nssnmp: couldn't create socket: %s:%d: %s", srvPtr->radius.address, srvPtr->radius.acct_port, strerror(errno));
+        } else {
+            srvPtr->radius.acct_sock = sock;
+            Ns_SockCallback(sock, RadiusProc, srvPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
             Ns_Log(Notice,"nssnmp: radius: listening on %s:%d by %s",
-                          serverPtr->radius.address?serverPtr->radius.address:"0.0.0.0",
-                          serverPtr->radius.acct_port,
-                          serverPtr->radius.proc);
+                          srvPtr->radius.address?srvPtr->radius.address:"0.0.0.0",
+                          srvPtr->radius.acct_port,
+                          srvPtr->radius.proc);
         }
     }
+
+    /* Configure Syslog listener */
+    if (Ns_ConfigGetBool(path, "enablesyslog", &srvPtr->syslog.enabled)) {
+        if (srvPtr->syslog.address) {
+            if ((sock = Ns_SockListenUdp(srvPtr->syslog.address, srvPtr->syslog.port)) == -1) {
+                Ns_Log(Error,"nssnmp: couldn't create socket: %s:%d: %s", srvPtr->trap.address, srvPtr->trap.port, strerror(errno));
+            } else {
+                srvPtr->syslog.udp_sock = sock;
+                Ns_SockCallback(sock, SyslogProc, srvPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
+                Ns_Log(Notice,"nssnmp: listening on %s:%d by %s",
+                              srvPtr->syslog.address, srvPtr->syslog.port,
+                              srvPtr->syslog.proc?srvPtr->syslog.proc:"None");
+            }
+        }
+        if (srvPtr->syslog.path) {
+            if ((sock = Ns_SockListenUnix(srvPtr->syslog.path, 0, 0666)) == -1) {
+                Ns_Log(Error,"nssnmp: couldn't create socket: %s: %s", srvPtr->syslog.path, strerror(errno));
+            } else {
+                srvPtr->syslog.unix_sock = sock;
+                Ns_SockCallback(sock, SyslogProc, srvPtr, NS_SOCK_READ|NS_SOCK_EXIT|NS_SOCK_EXCEPTION);
+                Ns_Log(Notice,"nssnmp: listening on %s by %s",
+                              srvPtr->syslog.path, srvPtr->syslog.proc?srvPtr->syslog.proc:"None");
+            }
+        }
+        Ns_DStringInit(&srvPtr->syslog.buffer);
+    }
+
     /* Schedule garbage collection proc for automatic session close/cleanup */
-    if (serverPtr->gc_interval > 0) {
-        Ns_ScheduleProc(SessionGC, serverPtr, 1, serverPtr->gc_interval);
-        Ns_Log(Notice,"ns_snmp: scheduling GC proc for every %d secs", serverPtr->gc_interval);
+    if (srvPtr->gc_interval > 0) {
+        Ns_ScheduleProc(SessionGC, srvPtr, 1, srvPtr->gc_interval);
+        Ns_Log(Notice,"ns_snmp: scheduling GC proc for every %d secs", srvPtr->gc_interval);
     }
-    Ns_MutexSetName2(&serverPtr->snmpMutex, "nssnmp", "snmp");
-    Ns_MutexSetName2(&serverPtr->mibMutex, "nssnmp", "mib");
-    Ns_MutexSetName2(&serverPtr->icmp.mutex, "nssnmp", "icmp");
-    Ns_MutexSetName2(&serverPtr->radius.dictMutex, "nssnmp", "radiusDict");
-    Ns_MutexSetName2(&serverPtr->radius.userMutex, "nssnmp", "radiusUser");
-    Ns_MutexSetName2(&serverPtr->radius.clientMutex, "nssnmp", "radiusClient");
-    Ns_MutexSetName2(&serverPtr->radius.requestMutex, "nssnmp", "radiusRequest");
-    Ns_TclRegisterTrace(server, SnmpInterpInit, serverPtr, NS_TCL_TRACE_CREATE);
-    RadiusInit(serverPtr);
+    RadiusInit(srvPtr);
+    Ns_MutexSetName2(&srvPtr->radius.dictMutex, "nssnmp", "radiusDict");
+    Ns_MutexSetName2(&srvPtr->radius.userMutex, "nssnmp", "radiusUser");
+    Ns_MutexSetName2(&srvPtr->radius.clientMutex, "nssnmp", "radiusClient");
+    Ns_MutexSetName2(&srvPtr->radius.requestMutex, "nssnmp", "radiusRequest");
+    Ns_MutexSetName2(&srvPtr->icmp.mutex, "nssnmp", "icmp");
+    Ns_MutexSetName2(&srvPtr->mibMutex, "nssnmp", "mib");
+    Ns_MutexSetName2(&srvPtr->snmpMutex, "nssnmp", "snmp");
+    Ns_TclRegisterTrace(server, SnmpInterpInit, srvPtr, NS_TCL_TRACE_CREATE);
     return NS_OK;
 }
 
@@ -889,16 +966,6 @@ static void TrapDump(Server *server,Pdu &pdu,SnmpTarget &target)
     }
     Ns_Log(Debug,"nssnmp: %s",Ns_DStringValue(&ds));
     Ns_DStringFree(&ds);
-}
-
-static int UdpListen(char *address,int port)
-{
-    int sock;
-    if ((sock = Ns_SockListenUdp(address,port)) == -1) {
-        Ns_Log(Error,"nssnmp: couldn't create socket: %s:%d: %s",address,port,strerror(errno));
-        return -1;
-    }
-    return sock;
 }
 
 /*
@@ -2192,146 +2259,20 @@ static void FormatIntTC(Tcl_Interp *interp, char *bytes, char *fmt)
     }
 }
 
-/* $Id$
- *
- * This code implements the MD5 message-digest algorithm.
- * The algorithm is due to Ron Rivest.  This code was
- * written by Colin Plumb in 1993,  no copyright is claimed.
- * This code is in the public domain; do with it what you wish.
- *
- * Equivalent code is available from RSA Data Security,  Inc.
- * This code has been tested against that,  and is equivalent, 
- * except that you don't need to include two pages of legalese
- * with every copy.
- *
- * To compute the message digest of a chunk of bytes,  declare an
- * MD5Context structure,  pass it to MD5Init,  call MD5Update as
- * needed on buffers full of bytes,  and then call MD5Final,  which
- * will fill a supplied 16-byte array with the digest.
- *
- * $Log$
- * Revision 1.17  2006/03/21 00:33:46  seryakov
- * minor additions to RADIUS server
- *
- * Revision 1.16  2006/03/18 18:05:41  seryakov
- * modules cleanups and updates
- *
- * Revision 1.15  2006/03/18 05:50:50  seryakov
- * RADIUS server completion, full dictinary support
- *
- * Revision 1.14  2006/03/18 04:13:19  seryakov
- * For Linux systems use native crypt which supports MD5 digests, increase encryption buffer
- *
- * Revision 1.13  2006/03/18 00:07:24  seryakov
- * big RADIUS rewrite, server and user support
- *
- * Revision 1.12  2006/02/10 18:03:25  seryakov
- * ignore hint in ns_mib set when enums are specified
- *
- * Revision 1.11  2006/01/24 15:36:04  seryakov
- * Changed all modules to new Ns_Sock timeout API
- *
- * Revision 1.10  2006/01/05 15:36:33  seryakov
- * added debug config option
- *
- * Revision 1.9  2005/11/21 18:18:14  seryakov
- * *** empty log message ***
- *
- * Revision 1.8  2005/08/07 22:15:09  seryakov
- * added support of broadcasting to all udp commands
- *
- * Revision 1.7  2005/08/01 19:47:45  seryakov
- * removed old compat functions
- *
- * Revision 1.6  2005/07/21 14:44:39  seryakov
- * *** empty log message ***
- *
- * Revision 1.5  2005/07/21 14:40:19  seryakov
- * fixed bug in ns_ping
- *
- * Revision 1.4  2005/06/12 22:34:24  seryakov
- * compiler warnings silence
- *
- * Revision 1.3  2005/06/09 21:31:30  seryakov
- * rewrote nssnmp's ns_udp using new Objv interface,  added to nsudp's ns_udp -retries
- * parameter.
- *
- * Revision 1.2  2005/06/08 20:03:50  seryakov
- * Changed license and wording in README files.
- *
- * Revision 1.1.1.1  2005/05/20 20:47:23  seryakov
- * initial import
- *
- * Revision 1.18  2004/10/15 23:57:57  seryakov
- * *** empty log message ***
- *
- * Revision 1.17  2004/10/15 21:53:33  seryakov
- * added ns_udp,  ns_snmp trap|inform commands
- *
- * Revision 1.16  2004/09/29 15:41:37  seryakov
- * nsmibdump added
- *
- * Revision 1.15  2004/09/26 03:27:34  seryakov
- * ns_mib labels added syntax condition
- *
- * Revision 1.14  2004/09/24 15:55:15  seryakov
- * icmp fixes
- *
- * Revision 1.13  2004/09/23 19:08:22  seryakov
- * minor bugfixes
- *
- * Revision 1.12  2004/09/20 17:52:37  seryakov
- * RADIUS improvements
- *
- * Revision 1.11  2004/09/19 20:58:53  seryakov
- * Added RADIUS client and server support
- *
- * Revision 1.2  2000/09/11 05:13:24  vlad
- * *** empty log message ***
- *
- * Revision 1.1.1.1  1999/08/19 13:13:26  aland
- * 	Start of the pam_radius module
- *
- * Revision 1.2  1998/04/03 20:19:21  aland
- * now builds cleanly on Solaris 2.6
- *
- * Revision 1.1  1998/04/03 19:36:59  aland
- * oh yeah,  do MD5 stuff,  too
- *
- * Revision 1.1  1996/12/01 03:06:54  morgan
- * Initial revision
- *
- * Revision 1.1  1996/09/05 06:43:31  morgan
- * Initial revision
- *
- */
-
-static void MD5Transform(unsigned int buf[4],  unsigned int const in[16]);
-
-#ifdef sun
-#define HIGHFIRST
-#endif
-
-#ifndef HIGHFIRST
-#define byteReverse(buf,  len)	/* Nothing */
-#else
-void byteReverse(unsigned char *buf,  unsigned len);
-
-#ifndef ASM_MD5
 /*
  * Note: this code is harmless on little-endian machines.
  */
 static void byteReverse(unsigned char *buf,  unsigned len)
 {
+#ifdef HIGHFIRST
     unsigned int t;
     do {
       t = (unsigned int) ((unsigned) buf[3] << 8 | buf[2]) << 16 | ((unsigned) buf[1] << 8 | buf[0]);
       *(unsigned int *) buf = t;
       buf += 4;
     } while (--len);
+#endif
 }
-#endif
-#endif
 
 /*
  * Start MD5 accumulation.  Set bit count to 0 and buffer to mysterious
@@ -2425,20 +2366,6 @@ static void MD5Final(unsigned char digest[16],  struct MD5Context *ctx)
     memset(ctx,  0,  sizeof(ctx));	/* In case it's sensitive */
 }
 
-#ifndef ASM_MD5
-
-/* The four core functions - F1 is optimized somewhat */
-
-/* #define F1(x,  y,  z) (x & y | ~x & z) */
-#define F1(x,  y,  z) (z ^ (x & (y ^ z)))
-#define F2(x,  y,  z) F1(z,  x,  y)
-#define F3(x,  y,  z) (x ^ y ^ z)
-#define F4(x,  y,  z) (y ^ (x | ~z))
-
-/* This is the central step in the MD5 algorithm. */
-#define MD5STEP(f,  w,  x,  y,  z,  data,  s) \
-	( w += f(x,  y,  z) + data,   w = w<<s | w>>(32-s),   w += x )
-
 /*
  * The core of the MD5 algorithm,  this alters an existing MD5 hash to
  * reflect the addition of 16 longwords of new data.  MD5Update blocks
@@ -2526,8 +2453,6 @@ static void MD5Transform(unsigned int buf[4],  unsigned int const in[16])
     buf[2] += c;
     buf[3] += d;
 }
-
-#endif
 
 static void MD5Calc(unsigned char *output,  unsigned char *input,  unsigned int inlen)
 {
@@ -2720,6 +2645,13 @@ static RadiusAttr *RadiusAttrCreate(Server *server, char *name, int attr, int ve
     }
     switch(vp->type) {
      case RADIUS_TYPE_STRING:
+         if (len <= 0) {
+             len = strlen((const char*)val);
+         }
+         vp->lval = len < RADIUS_STRING_LEN ? len : RADIUS_STRING_LEN;
+         memcpy(vp->sval, val, vp->lval);
+         Ns_StrTrimRight((char*)vp->sval);
+         break;
      case RADIUS_TYPE_FILTER_BINARY:
          if (len <= 0) {
              len = strlen((const char*)val);
@@ -2777,7 +2709,7 @@ static void RadiusAttrPrintf(RadiusAttr *vp, Ns_DString *ds, int printname, int 
             Ns_DStringPrintf(ds, "%d", attr->lval);
             break;
          case RADIUS_TYPE_IPADDR:
-            Ns_DStringPrintf(ds, "%s ", ns_inet_ntoa(*((struct in_addr*)&attr->lval)));
+            Ns_DStringPrintf(ds, "%s", ns_inet_ntoa(*((struct in_addr*)&attr->lval)));
             break;
          case RADIUS_TYPE_STRING:
          case RADIUS_TYPE_FILTER_BINARY:
@@ -3738,5 +3670,179 @@ static void RadiusInit(Server *server)
    RadiusDictAdd(server, "Acct-Output-Packets", 48, 0, RADIUS_TYPE_INTEGER);
    RadiusDictAdd(server, "Acct-Terminate-Cause", 49, 0, RADIUS_TYPE_INTEGER);
    RadiusDictAdd(server, "User-Id", 99, 0, RADIUS_TYPE_STRING);
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * SyslogProc --
+ *
+ *	Socket callback to receive syslog events
+ *
+ * Results:
+ *	NS_TRUE
+ *
+ * Side effects:
+ *  	None
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int SyslogProc(SOCKET sock, void *arg, int why)
+{
+    struct sockaddr_in sa;
+    Server *server = (Server*)arg;
+    int rc, len, priority = -1, iFacility = 0, iSeverity = 0;
+    char buf[1024], *ptr, *sFacility = 0, *sSeverity = 0;
+    socklen_t salen = sizeof(struct sockaddr_in);
+
+    if (why != NS_SOCK_READ) {
+        close(sock);
+        return NS_FALSE;
+    }
+
+    if (sock == server->syslog.udp_sock) {
+        if ((len = recvfrom(sock, buf, sizeof(buf) - 1, 0, (struct sockaddr*)&sa, &salen)) <= 0) {
+            Ns_Log(Error, "SyslogProc: %d: recvfrom error: %s", sock, strerror(errno));
+            return NS_TRUE;
+        }
+    } else {
+       if ((len = recv(sock, buf, sizeof(buf) - 1, 0)) <= 0) {
+           Ns_Log(Error, "SyslogProc: %d: recv error: %s", sock, strerror(errno));
+           return NS_TRUE;
+       }
+       sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+    }
+    buf[len] = 0;
+    ptr = buf;
+    /* Parse priority */
+    if (*ptr == '<') {
+        priority = atoi(++ptr);
+        while (isdigit(*ptr)) {
+            ptr++;
+        }
+        if (*ptr != '>') {
+            return NS_TRUE;
+        }
+        ptr++;
+    }
+    iFacility = priority / 8;
+    iSeverity = priority - iFacility * 8;
+    /* Format the message*/
+    switch (iFacility) {
+     case 0:
+        sFacility = "kern";
+        break;
+     case 1:
+        sFacility = "user";
+        break;
+     case 2:
+        sFacility = "mail";
+        break;
+     case 3:
+        sFacility = "daemon";
+        break;
+     case 4:
+        sFacility = "auth";
+        break;
+     case 5:
+        sFacility = "intern";
+        break;
+     case 6:
+        sFacility = "print";
+        break;
+     case 7:
+        sFacility = "news";
+        break;
+     case 8:
+        sFacility = "uucp";
+        break;
+     case 9:
+        sFacility = "clock";
+        break;
+     case 10:
+        sFacility = "security";
+        break;
+     case 11:
+        sFacility = "ftp";
+        break;
+     case 12:
+        sFacility = "ntp";
+        break;
+     case 13:
+        sFacility = "audit";
+        break;
+     case 14:
+        sFacility = "alert";
+        break;
+     case 15:
+        sFacility = "clock";
+        break;
+     case 16:
+        sFacility = "local0";
+        break;
+     case 17:
+        sFacility = "local1";
+        break;
+     case 18:
+        sFacility = "local2";
+        break;
+     case 19:
+        sFacility = "local3";
+        break;
+     case 20:
+        sFacility = "local4";
+        break;
+     case 21:
+        sFacility = "local5";
+        break;
+     case 22:
+        sFacility = "local6";
+        break;
+     case 23:
+        sFacility = "local7";
+        break;
+     default:
+        sFacility = "none";
+    }
+    switch (iSeverity) {
+     case 0:
+        sSeverity = "emergency";
+        break;
+     case 1:
+        sSeverity = "alert";
+        break;
+     case 2:
+        sSeverity = "critical";
+        break;
+     case 3:
+        sSeverity = "error";
+        break;
+     case 4:
+        sSeverity = "warning";
+        break;
+     case 5:
+        sSeverity = "notice";
+        break;
+     case 6:
+        sSeverity = "info";
+        break;
+     case 7:
+        sSeverity = "debug";
+        break;
+     default:
+        sSeverity = "none";
+    }
+    if (server->syslog.proc) {
+        Tcl_Interp *interp = Ns_TclAllocateInterp(server->name);
+        Ns_DStringPrintf(&server->syslog.buffer, "%s %s %s %s {%s}", server->syslog.proc, ns_inet_ntoa(sa.sin_addr), sSeverity, sFacility, ptr);
+        rc = Tcl_Eval(interp, server->syslog.buffer.string);
+        Ns_TclDeAllocateInterp(interp);
+        if (rc != TCL_OK) {
+            return NS_TRUE;
+        }
+    }
+    Ns_Log(Notice, "%s/%s: %s", sSeverity, sFacility, ptr);
+    return NS_TRUE;
 }
 

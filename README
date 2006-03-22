@@ -3,11 +3,10 @@ Release 2.0
 vlad@crystalballinc.com
 
 This is NaviServer module that implements SNMP v1,v2c and some
-primitive MIB support, ICMP, RADIUS and Syslog protocols. 
+primitive MIB support, ICMP. 
 It is based on SNMP++ library from http:://www.agentpp.com. 
 It allows to use NaviServer as SNMP trap server and build 
-SNMP monitoring packages and act as RADIUS authentication server and
-syslog server.
+SNMP monitoring packages.
 
 /*--------------------------------------------------------------------*/
 
@@ -32,15 +31,6 @@ ns_param	trap_proc	 tcl_trap_handler
 ns_param	trap_address	 127.0.0.1
 ns_param	idle_timeout	 600
 ns_param	gc_interval	 600
-ns_param	enablesyslog	 false
-ns_param	syslog_port	 514
-ns_param	syslog_proc	 tcl_syslog_handler
-ns_param	syslog_address	 0.0.0.0
-ns_param	enableradius	 false
-ns_param	radius_auth_port 1645
-ns_param	radius_auth_port 1646
-ns_param	radius_proc	 tcl_trap_handler
-ns_param	radius_address	 127.0.0.1
 
 Timeout is in seconds, version 1 is 0, version 2c is 1.
 In order to enable trap agent, trap_proc should be specified.
@@ -167,12 +157,6 @@ requests.
 
       returns the following Tcl list:
        { requests_sent requests_received loss_percentage rtt_min rtt_avg rtt_max }
-
-    ns_radius send host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...
-      performs RADIUS requests
-
-      Example:
-        ns_radius send localhost 1645 secret User-Name test User-Password test2
 
    
 Nsmibdump

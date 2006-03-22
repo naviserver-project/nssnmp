@@ -20,7 +20,7 @@ OBJS     = nssnmp.o
 #
 # Library Tcl files
 #
-PROCS	= nsmib_procs.tcl nsradius_procs.tcl
+PROCS	= nsmib_procs.tcl nsradius_procs.tcl syslog_procs.tcl
 
 INSTALL += install-procs
 

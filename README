@@ -15,6 +15,10 @@ Compiling and Installing
 To compile this driver, you'll need to have SNMP++ library compiled 
 and installed. NaviServer can be installed or source distribution may be used.
 
+There is special makefile target to automatically download and compile snmp++.
+Try to issue make snmp_pp, it should compile and install snmp++ library under
+/usr/local.
+
 Configuring
 
 Here is an nsd.tcl excerpt for configuring the SNMP module:

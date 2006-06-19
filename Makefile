@@ -4,7 +4,7 @@ endif
 
 # Uncomment if SNMP++ compiled with SNMPv3 support
 #DES		= -ldes
-SNMPINC 	= /usr/local/include/snmp++
+SNMPINC 	= /usr/local/include
 SNMPLIB		= -lsnmp++ $(DES)
 
 #
@@ -37,3 +37,11 @@ install-procs: $(PROCS)
 
 nsmibdump:	nsmibdump.c
 	gcc -o nsmibdump nsmibdump.c -lsmi
+
+snmp_pp:
+	rm -rf snmp++
+	wget -c -O /tmp/snmp++.tar.gz http://www.agentpp.com/snmp++v3.2.21.tar.gz
+	tar -xzf /tmp/snmp++.tar.gz
+	make -C snmp++/src -f Makefile.linux USEROPTS="-g -D_NO_SNMPv3" install
+	rm -rf snmp++
+

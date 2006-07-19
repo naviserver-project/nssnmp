@@ -1,4 +1,4 @@
-/* 
+/*
  * The contents of this file are subject to the Mozilla Public License
  * Version 1.1(the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
@@ -20,7 +20,7 @@
  * version of this file under either the License or the GPL.
  *
  * Author Vlad Seryakov vlad@crystalballinc.com
- * 
+ *
  */
 
 /*
@@ -41,7 +41,7 @@
  *       according to idle_timeout parameter
  *
  *    ns_snmp create host {-port p -community c -writecommunity c -timeout t -retries r -version 1|2 -bulk b}
- *      creates new SNMP session for specified host. Optional parameters 
+ *      creates new SNMP session for specified host. Optional parameters
  *      can be specified.
  *      Example:
  *         ns_snmp create localhost -community aaa -bulk 25 -timeout 3
@@ -58,7 +58,7 @@
  *         set val [ns_snmp get $fd get 1.3.6.1.2.1.2.2.1.6]
  *
  *    ns_snmp walk #s OID var script
- *      walks SNMP MIB tree and executes script for every variable which is 
+ *      walks SNMP MIB tree and executes script for every variable which is
  *      stored in specified Tcl variable var.
  *      Example:
  *         set fd [ns_snmp create localhost]
@@ -84,7 +84,7 @@
  *    ns_snmp destroy $s
  *      destroys SNMP session
  *
- *  To receive traps the module should listens on SNMP trap port 162 or as 
+ *  To receive traps the module should listens on SNMP trap port 162 or as
  *  specified in config file.
  *
  *  Trap config example:
@@ -220,22 +220,9 @@ class SnmpSession {
     void *server;
 };
 
-class SnmpString:public OctetStr {
-  public:
-    char *get_printable();
-    char *get_printable_hex();
-     SnmpString & operator=(unsigned long val);
-};
-
 class SnmpVb:public Vb {
   public:
-    char *get_printable_value();
-    int get_exception_status() {
-        return exception_status;
-    } int SetValue(char *type, char *value);
-  protected:
-    SnmpString str;
-    char *value;
+    int SetValue(char *type, char *value);
 };
 
 typedef struct _mibEntry {
@@ -670,7 +657,7 @@ static void TrapDump(Server * server, Pdu & pdu, SnmpTarget & target)
         pdu.get_vb(vb, i);
         Ns_DStringPrintf(&ds, "%s {%s} {%s} ", vb.get_printable_oid(), SyntaxStr(vb.get_syntax()), vb.get_printable_value());
     }
-    Ns_Log(Debug, "nssnmp: %s", Ns_DStringValue(&ds));
+    Ns_Log(Notice, "nssnmp: %s", Ns_DStringValue(&ds));
     Ns_DStringFree(&ds);
 }
 
@@ -1092,6 +1079,7 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
     case cmdSessions:
     case cmdCreate:
         break;
+
     case cmdConfig:
         if (objc < 4) {
             Tcl_AppendResult(interp, "wrong # args: should be ns_snmp config #s name", 0);
@@ -1163,6 +1151,7 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             Tcl_SetObjResult(interp, list);
             break;
         }
+
     case cmdWalk:{
             if (objc < 6) {
                 Tcl_AppendResult(interp, "wrong # args: should be ns_snmp walk #s OID var script", 0);
@@ -1214,6 +1203,7 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             }
             break;
         }
+
     case cmdSet:{
             if (objc < 6) {
                 Tcl_AppendResult(interp, "wrong # args: should be ns_snmp set #s OID type value", 0);
@@ -1235,6 +1225,7 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             }
             break;
         }
+
     case cmdTrap:
     case cmdInform:{
             if (objc < 5) {
@@ -1270,80 +1261,12 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             }
             break;
         }
+
     case cmdDestroy:
         SessionUnlink(server, session, 1);
         break;
     }
     return TCL_OK;
-}
-
-char *SnmpString::get_printable()
-{
-    for (unsigned long i = 0; i < smival.value.string.len; i++) {
-        if ((smival.value.string.ptr[i] != '\r') &&
-            (smival.value.string.ptr[i] != '\n') && (isprint((int) (smival.value.string.ptr[i])) == 0)) {
-            return (get_printable_hex());
-        }
-    }
-    if (output_buffer) {
-        delete[]output_buffer;
-    }
-    output_buffer = new char[smival.value.string.len + 1];
-    if (smival.value.string.len) {
-        memcpy(output_buffer, smival.value.string.ptr, (unsigned int) smival.value.string.len);
-    }
-    output_buffer[smival.value.string.len] = '\0';
-    return (output_buffer);
-}
-
-char *SnmpString::get_printable_hex()
-{
-    int local_len = (int) smival.value.string.len;
-    unsigned char *bytes = smival.value.string.ptr;
-    char *ptr;
-
-    if (output_buffer) {
-        delete[]output_buffer;
-    }
-    ptr = output_buffer = new char[smival.value.string.len * 3 + 1];
-    while (local_len > 0) {
-        sprintf(ptr, "%2.2X ", *bytes++);
-        ptr += 3;
-        local_len--;
-    }
-    return output_buffer;
-}
-
-SnmpString & SnmpString::operator=(unsigned long val)
-{
-    delete[]smival.value.string.ptr;
-    smival.value.string.len = 32;
-    smival.value.string.ptr = new unsigned char[33];
-    sprintf((char *) smival.value.string.ptr, "%lu", val);
-    return *this;
-}
-
-char *SnmpVb::get_printable_value()
-{
-    /* Take care about hex printable format for strings */
-    switch (get_syntax()) {
-    case sNMP_SYNTAX_TIMETICKS:{
-            unsigned long val;
-            get_value(val);
-            str = val;
-            value = (char *) str.data();
-            break;
-        }
-    case sNMP_SYNTAX_BITS:
-    case sNMP_SYNTAX_OPAQUE:
-    case sNMP_SYNTAX_OCTETS:
-        get_value(str);
-        value = str.get_printable();
-        break;
-    default:
-        value = (char *) Vb::get_printable_value();
-    }
-    return value;
 }
 
 int SnmpVb::SetValue(char *type, char *value)
@@ -1352,45 +1275,51 @@ int SnmpVb::SetValue(char *type, char *value)
     case 'i':
         set_value((long) atol(value));
         break;
+
     case 'u':
         set_value((unsigned long) atol(value));
         break;
+
     case 't':{
-            TimeTicks tm(atol(value));
-            if (tm.valid()) {
-                set_value(tm);
-            } else {
-                return TCL_ERROR;
-            }
-            break;
+        TimeTicks tm(atol(value));
+        if (tm.valid()) {
+            set_value(tm);
+        } else {
+            return TCL_ERROR;
         }
+        break;
+    }
+
     case 'a':{
-            IpAddress ipaddr(value);
-            if (ipaddr.valid()) {
-                set_value(ipaddr);
-            } else {
-                return TCL_ERROR;
-            }
-            break;
+        IpAddress ipaddr(value);
+        if (ipaddr.valid()) {
+            set_value(ipaddr);
+        } else {
+            return TCL_ERROR;
         }
+        break;
+    }
+
     case 'o':{
-            Oid oid(value);
-            if (oid.valid()) {
-                set_value(oid);
-            } else {
-                return TCL_ERROR;
-            }
-            break;
+        Oid oid(value);
+        if (oid.valid()) {
+            set_value(oid);
+        } else {
+            return TCL_ERROR;
         }
+        break;
+    }
+
     case 's':{
-            OctetStr str(value);
-            if (str.valid()) {
-                set_value(str);
-            } else {
-                return TCL_ERROR;
-            }
-            break;
+        OctetStr str(value);
+        if (str.valid()) {
+            set_value(str);
+        } else {
+            return TCL_ERROR;
         }
+        break;
+    }
+
     default:
         return TCL_ERROR;
     }
@@ -1789,6 +1718,7 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
         }
         sent++;
         retry_count = 0;
+
       again:
         // Check the total time we spent pinging
         if (time(0) - start_time > timeout)
@@ -1808,7 +1738,7 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             gettimeofday(&t2, 0);
             if (addr.sin_addr.s_addr != addr2.sin_addr.s_addr) {
                 if (debug) {
-                    Ns_Log(Debug, "ns_ping: %d/%d: %s: invalid IP %s", id, fd, host, ns_inet_ntoa(addr2.sin_addr));
+                    Ns_Log(Notice, "ns_ping: %d/%d: %s: invalid IP %s", id, fd, host, ns_inet_ntoa(addr2.sin_addr));
                 }
                 goto again;
             }
@@ -1816,13 +1746,13 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
         case -1:
             if ((errno == EINTR || errno == EAGAIN || errno == EINPROGRESS) && ++retry_count < 2) {
                 if (debug) {
-                    Ns_Log(Debug, "ns_ping: %d/%d: %s: interrupted,  %d retry", id, fd, host, retry_count);
+                    Ns_Log(Notice, "ns_ping: %d/%d: %s: interrupted,  %d retry", id, fd, host, retry_count);
                 }
                 goto again;
             }
         default:
             if (debug) {
-                Ns_Log(Debug, "ns_ping: %d/%d: %s: timeout,  %d sent", id, fd, host, sent);
+                Ns_Log(Notice, "ns_ping: %d/%d: %s: timeout,  %d sent", id, fd, host, sent);
             }
             continue;
         }
@@ -1830,7 +1760,7 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
         ip = (struct ip *) buf;
         if (len < (hlen = ip->ip_hl << 2) + ICMP_MINLEN) {
             if (debug) {
-                Ns_Log(Debug, "ns_ping: %d/%d: %s: corrupted packet,  %d", id, fd, host, len);
+                Ns_Log(Notice, "ns_ping: %d/%d: %s: corrupted packet,  %d", id, fd, host, len);
             }
             goto again;
         }
@@ -1838,7 +1768,7 @@ static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
         /* Wrong packet */
         if (icp->icmp_type != ICMP_ECHOREPLY || icp->icmp_id != id) {
             if (debug) {
-                Ns_Log(Debug, "ns_ping: %d/%d: %s: invalid type %d or id %d", id, fd, host, icp->icmp_type, icp->icmp_id);
+                Ns_Log(Notice, "ns_ping: %d/%d: %s: invalid type %d or id %d", id, fd, host, icp->icmp_type, icp->icmp_id);
             }
             goto again;
         }

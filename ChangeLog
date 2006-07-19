@@ -1,7 +1,11 @@
+2006-07-19 Vlad Seryakov vlad@crystalballinc.com
+
+        * Updated to the latest snmp++ library
+
 2006-03-21 Vlad Seryakov vlad@crystalballinc.com
 
 	* Added syslog server support
-        
+
 2006-03-17 Vlad Seryakov vlad@crystalballinc.com
 
 	* Removed ns_udp, it is handled by ns_udp module now
@@ -14,7 +18,7 @@
 2005-11-21 Vlad Seryakov vlad@crystalballinc.com
 
 	* fixed icmp id overload condition
-        
+
 2005-08-01 Vlad Seryakov vlad@crystalballinc.com
 
 	* removed old compat functions

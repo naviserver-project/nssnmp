@@ -5,7 +5,7 @@ endif
 # Uncomment if SNMP++ compiled with SNMPv3 support
 #DES		= -ldes
 SNMPINC 	= /usr/local/include
-SNMPLIB		= -lsnmp++ $(DES)
+SNMPLIB		= /usr/local/lib/libsnmp++.a $(DES)
 
 #
 # Module name
@@ -30,7 +30,7 @@ MODLIBS	 = $(SNMPLIB)
 include  $(NAVISERVER)/include/Makefile.module
 
 CC	= g++
-LDSO	= g++ -shared -nostartfiles
+LDSO	= g++ -shared
 
 install-procs: $(PROCS)
 	for f in $(PROCS); do $(INSTALL_SH) $$f $(INSTTCL)/; done

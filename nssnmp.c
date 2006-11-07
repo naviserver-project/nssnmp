@@ -1122,6 +1122,8 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             }
             SnmpVb vb;
             Oid oid;
+            unsigned long uv;
+
             session->pdu.set_vblist(&vb, 0);
             for (int i = 3; i < objc; i++) {
                 oid = Tcl_GetStringFromObj(objv[i], 0);
@@ -1145,7 +1147,11 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
                 obj = Tcl_NewListObj(0, 0);
                 Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char *) vb.get_printable_oid(), -1));
                 Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(SyntaxStr(vb.get_syntax()), -1));
-                Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char *) vb.get_printable_value(), -1));
+                if (vb.get_value(uv) == SNMP_CLASS_SUCCESS) {
+                  Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(uv));
+                } else {
+                  Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char *) vb.get_printable_value(), -1));
+                }
                 Tcl_ListObjAppendElement(interp, list, obj);
             }
             Tcl_SetObjResult(interp, list);
@@ -1159,7 +1165,9 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             }
             SnmpVb vb;
             Tcl_Obj *obj;
+            unsigned long uv;
             Oid oid(Tcl_GetStringFromObj(objv[3], 0));
+
             if (!oid.valid()) {
                 Tcl_AppendResult(interp, "invalid OID ", Tcl_GetStringFromObj(objv[3], 0), 0);
                 return TCL_ERROR;
@@ -1176,7 +1184,11 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
                     obj = Tcl_NewListObj(0, 0);
                     Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char *) vb.get_printable_oid(), -1));
                     Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(SyntaxStr(vb.get_syntax()), -1));
-                    Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(vb.get_printable_value(), -1));
+                    if (vb.get_value(uv) == SNMP_CLASS_SUCCESS) {
+                      Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(uv));
+                    } else {
+                      Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(vb.get_printable_value(), -1));
+                    }
                     if (Tcl_SetVar2Ex(interp, Tcl_GetStringFromObj(objv[4], 0), NULL, obj, TCL_LEAVE_ERR_MSG) == NULL) {
                         return TCL_ERROR;
                     }

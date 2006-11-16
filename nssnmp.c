@@ -1062,6 +1062,10 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
     case cmdTrap:
     case cmdInform:
     case cmdDestroy:
+        if (objc < 3) {
+            Tcl_AppendResult(interp, "session #s is required", 0);
+            return TCL_ERROR;
+        }
         break;
     }
     if (Tcl_GetIntFromObj(interp, objv[2], &id) != TCL_OK) {

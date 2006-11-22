@@ -1,3 +1,8 @@
+2006-11-21 Vlad Seryakov vlad@crystalballinc.com
+
+	* redesigned ns_ping command to support multiple 
+        hosts
+
 2006-11-16 Vlad Seryakov vlad@crystalballinc.com
 
 	* Fixed bug in command parser

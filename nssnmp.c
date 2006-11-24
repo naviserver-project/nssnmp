@@ -123,25 +123,6 @@
  *    ns_mib oid name
  *    ns_mib syntax OID|label
  *
- *  ICMP requests
- *    ns_ping host {-count n -timeout n -size n}
- *    performs ICMP ECHO queries
- *     where
- *       -count n specifies to send n ICMP packets
- *       -timeout n specifies to wait n seconds for reply
- *       -size n specifies n bytes of data to be sent
- *       all these options are optional
- *
- *     returns the following Tcl list:
- *      { requests_sent requests_received loss_percentage rtt_min rtt_avg rtt_max }
- *
- *  RADIUS requests
- *    ns_radius send host port secret ?Code code? ?Retries retries? ?Timeout timeout? ?attr value? ...
- *     performs RADIUS requests
- *
- *     Example:
- *       ns_radius send localhost 1645 secret User-Name test User-Password test2
- *
  * Authors
  *
  *     Vlad Seryakov vlad@crystalballinc.com
@@ -174,22 +155,6 @@ extern "C" {
 #include "snmp_pp/snmp_pp.h"
 
 #define SNMP_VERSION  "2.0"
-
-typedef struct _icmpPort {
-    struct _icmpPort *next, *prev;
-    int fd;
-    int id;
-    int count;
-    int timeout;
-    int sent;
-    int received;
-    float rtt_min;
-    float rtt_avg;
-    float rtt_max;
-    struct sockaddr_in sa;
-    struct timeval send_time;
-    struct timeval recv_time;
-} IcmpPort;
 
 class SnmpSession {
   public:
@@ -268,14 +233,6 @@ typedef struct _server {
     Tcl_HashTable mib;
     Ns_Mutex mibMutex;
     struct {
-        int id;
-        int count;
-        Ns_Cond cond;
-        Ns_Mutex mutex;
-        IcmpPort *head;
-        IcmpPort *tail;
-    } icmp;
-    struct {
         int port;
         Snmp *snmp;
         char *proc;
@@ -304,8 +261,6 @@ extern int receive_snmp_notification(int sock, Snmp & snmp_session, Pdu & pdu, S
 static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
 static int TrapCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
 static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
-static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
-static int IcmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[]);
 static void TrapDump(Server * server, Pdu & pdu, SnmpTarget & target);
 static const char *SnmpError(SnmpSession * session, int status);
 static int SnmpInterpInit(Tcl_Interp * interp, void *context);
@@ -398,27 +353,6 @@ extern "C" {
         if (!(srvPtr->trap.address = Ns_ConfigGetValue(path, "trap_address"))) {
             srvPtr->trap.address = "0.0.0.0";
         }
-        // Initialize ICMP system
-        if (Ns_ConfigGetInt(path, "icmp_ports", &srvPtr->icmp.count) > 0) {
-            IcmpPort *icmp;
-            for (int i = 0; i < srvPtr->icmp.count; i++) {
-                if ((sock = Ns_SockListenRaw(IPPROTO_ICMP)) == -1) {
-                    Ns_Log(Error, "nssnmp: couldn't create icmp socket: %s", strerror(errno));
-                    return NS_ERROR;
-                }
-                icmp = (IcmpPort *) ns_calloc(1, sizeof(IcmpPort));
-                icmp->fd = sock;
-                icmp->next = srvPtr->icmp.head;
-                if (icmp->next) {
-                    icmp->next->prev = icmp;
-                }
-                srvPtr->icmp.head = icmp;
-            }
-            for (icmp = srvPtr->icmp.head; icmp->next; icmp = icmp->next) {
-                srvPtr->icmp.tail = icmp;
-            }
-            Ns_Log(Notice, "nssnmp: allocated %d ICMP ports", srvPtr->icmp.count);
-        }
 
         /* Configure SNMP trap listener */
         if (srvPtr->trap.proc) {
@@ -442,7 +376,6 @@ extern "C" {
             Ns_ScheduleProc(SessionGC, srvPtr, 1, srvPtr->gc_interval);
             Ns_Log(Notice, "ns_snmp: scheduling GC proc for every %d secs", srvPtr->gc_interval);
         }
-        Ns_MutexSetName2(&srvPtr->icmp.mutex, "nssnmp", "icmp");
         Ns_MutexSetName2(&srvPtr->mibMutex, "nssnmp", "mib");
         Ns_MutexSetName2(&srvPtr->snmpMutex, "nssnmp", "snmp");
         Ns_TclRegisterTrace(server, SnmpInterpInit, srvPtr, NS_TCL_TRACE_CREATE);
@@ -470,8 +403,6 @@ static int SnmpInterpInit(Tcl_Interp * interp, void *arg)
 {
     Tcl_CreateObjCommand(interp, "ns_snmp", SnmpCmd, arg, NULL);
     Tcl_CreateObjCommand(interp, "ns_mib", MibCmd, arg, NULL);
-    Tcl_CreateObjCommand(interp, "ns_ping", PingCmd, arg, NULL);
-    Tcl_CreateObjCommand(interp, "ns_icmp", IcmpCmd, arg, NULL);
     Tcl_CreateObjCommand(interp, "ns_trap", TrapCmd, arg, NULL);
     return NS_OK;
 }
@@ -1561,352 +1492,6 @@ static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST
         Tcl_AppendResult(interp, mib->hint, 0);
         break;
     }
-    return TCL_OK;
-}
-
-// Calculate checksum for given buffer
-static int IcmpChksum(u_short * p, int n)
-{
-    register u_short answer;
-    register long sum = 0;
-    u_short odd_byte = 0;
-
-    while (n > 1) {
-        sum += *p++;
-        n -= 2;
-    }
-    if (n == 1) {
-        *(u_char *) (&odd_byte) = *(u_char *) p;
-        sum += odd_byte;
-    }
-    sum = (sum >> 16) + (sum & 0xffff); /* add hi 16 to low 16 */
-    sum += (sum >> 16);         /* add carry */
-    answer = ~sum;              /* ones-complement,  truncate */
-    return (answer);
-}
-
-static IcmpPort *IcmpLock(Server * server)
-{
-    Ns_Time timeout = { 1, 0 };
-    IcmpPort *port;
-
-    // Get next available socket
-    Ns_MutexLock(&server->icmp.mutex);
-    while (!(port = server->icmp.head)) {
-        Ns_CondTimedWait(&server->icmp.cond, &server->icmp.mutex, &timeout);
-    }
-    if (port != NULL) {
-        server->icmp.head = port->next;
-        if (port->next) {
-            port->next->prev = NULL;
-        }
-        if (port == server->icmp.tail) {
-            server->icmp.tail = NULL;
-        }
-        if ((port->id = ++server->icmp.id) > 65535) {
-            server->icmp.id = port->id = 1;
-        }
-        port->next = port->prev = 0;
-        port->sent = port->received = 0;
-        port->count = port->timeout = 0;
-        port->send_time.tv_sec = port->send_time.tv_usec = 0;
-        port->recv_time.tv_sec = port->recv_time.tv_usec = 0;
-        port->rtt_min = port->rtt_max = port->rtt_avg = 0;
-    }
-    Ns_MutexUnlock(&server->icmp.mutex);
-    return port;
-}
-
-static void IcmpUnlock(Server * server, IcmpPort *port)
-{
-    IcmpPort *next;
-
-    Ns_MutexLock(&server->icmp.mutex);
-    while (port) {
-        next = port->next;
-        if (server->icmp.tail) {
-            port->prev = server->icmp.tail;
-            server->icmp.tail->next = port;
-        }
-        if (server->icmp.head == NULL) {
-            server->icmp.head = port;
-        }
-        server->icmp.tail = port;
-        port->next = 0;
-        port = next;
-    }
-    Ns_CondBroadcast(&server->icmp.cond);
-    Ns_MutexUnlock(&server->icmp.mutex);
-}
-
-// Check host availability by simulating PING
-static int IcmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[])
-{
-    Server *server = (Server *) arg;
-    IcmpPort *port;
-
-    if (objc < 2) {
-        Tcl_WrongNumArgs(interp, 1, objv, "args");
-        return TCL_ERROR;
-    }
-    if (!strcmp(Tcl_GetString(objv[1]), "sockets")) {
-        Tcl_Obj *list = Tcl_NewListObj(0, 0);
-        Ns_MutexLock(&server->icmp.mutex);
-        for (port = server->icmp.head; port; port = port->next) {
-            Tcl_ListObjAppendElement(interp, list, Tcl_NewIntObj(port->fd));
-        }
-        Ns_MutexUnlock(&server->icmp.mutex);
-        Tcl_SetObjResult(interp, list);
-    }
-    return TCL_OK;
-}
-
-#define timediff(t1, t2) ((double)(t2.tv_sec - t1.tv_sec) * 1000.0 + (double)(t2.tv_usec - t1.tv_usec) / 1000.0)
-#define stimediff(t1, t2) ((double)(t2.tv_sec - t1.tv_sec) + (double)(t2.tv_usec - t1.tv_usec) / 1000000.0)
-
-// Check host availability by simulating PING
-static int PingCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[])
-{
-    Server *server = (Server *) arg;
-
-    if (objc < 2) {
-        Tcl_WrongNumArgs(interp, 1, objv, "?-alert 0|1? ?-timeout n? ?-debug 0|1? ?-count n? ?-size n? host ...");
-        return TCL_ERROR;
-    }
-
-    fd_set fds;
-    struct ip *ip;
-    char buf[4096];
-    struct icmp *icp;
-    time_t start_time;
-    struct timeval tv;
-    float elapsed;
-    struct sockaddr_in sa;
-    int maxfd, mintime, len, hlen, retries, loss;
-    IcmpPort *port, *ports = NULL;
-    socklen_t slen = sizeof(struct sockaddr);
-    int alert = 1, count = 3, size = 56, timeout = 2, wait = 0, debug = 0;
-
-    for (int i = 1; i < objc; i++) {
-        if (!strcmp(Tcl_GetString(objv[i]), "-alert")) {
-            if (i < objc - 1) {
-                alert = atoi(Tcl_GetString(objv[i + 1]));
-            }
-            i++;
-        } else
-        if (!strcmp(Tcl_GetString(objv[i]), "-wait")) {
-            if (i < objc - 1) {
-                wait = atoi(Tcl_GetString(objv[i + 1]));
-            }
-            i++;
-        } else
-        if (!strcmp(Tcl_GetString(objv[i]), "-debug")) {
-            if (i < objc - 1) {
-                debug = atoi(Tcl_GetString(objv[i + 1]));
-            }
-            i++;
-        } else
-        if (!strcmp(Tcl_GetString(objv[i]), "-size")) {
-            if (i < objc - 1) {
-                if ((size = atoi(Tcl_GetString(objv[i + 1]))) < 56 || size > (int) sizeof(buf) - 8) {
-                    size = 56;
-                }
-            }
-            i++;
-        } else
-        if (!strcmp(Tcl_GetString(objv[i]), "-timeout")) {
-            if (i < objc - 1) {
-                if ((len = atoi(Tcl_GetString(objv[i + 1]))) <= 0) {
-                    len = 2;
-                }
-                // Apply to last port
-                if (ports != NULL) {
-                    ports->timeout = len;
-                } else {
-                    timeout = len;
-                }
-            }
-            i++;
-        } else
-        if (!strcmp(Tcl_GetString(objv[i]), "-count")) {
-            if (i < objc - 1) {
-                if ((len = atoi(Tcl_GetString(objv[i + 1]))) <= 0) {
-                    len = 3;
-                }
-                // Apply to last port
-                if (ports != NULL) {
-                    ports->count = len;
-                } else {
-                    count = len;
-                }
-            }
-            i++;
-        } else {
-           if ((port = IcmpLock(server)) == NULL) {
-               Tcl_AppendResult(interp, "noResources: no ICMP socket for ", Tcl_GetString(objv[i]), 0);
-               return TCL_ERROR;
-           }
-           // Add to the list of sockets
-           port->next = ports;
-           ports = port;
-           ports->count = count;
-           ports->timeout = timeout;
-           // Resolve given host name
-           if (Ns_GetSockAddr(&port->sa, Tcl_GetString(objv[i]), 0) != NS_OK) {
-               Tcl_AppendResult(interp, "noHost: unknown host ", Tcl_GetString(objv[i]), 0);
-               IcmpUnlock(server, ports);
-               return TCL_ERROR;
-           }
-        }
-    }
-    if (ports == NULL) {
-        Tcl_AppendResult(interp, "no hosts specified", 0);
-        return TCL_ERROR;
-    }
-    start_time = time(0);
-
-    while (1) {
-
-        FD_ZERO(&fds);
-        maxfd = retries = 0;
-        mintime = timeout;
-
-        for (port = ports; port; port = port->next) {
-             gettimeofday(&tv, 0);
-             // Time since last send
-             elapsed = stimediff(port->send_time, tv);
-             if (port->received < port->count) {
-                 // All packets are sent and timed out since last send
-                 if (elapsed > port->timeout && port->sent == port->count) {
-                     continue;
-                 }
-                 // We still can wait for packets for this port
-                 FD_SET(port->fd, &fds);
-                 maxfd = MAX(port->fd, maxfd);
-                 mintime = MIN(mintime, port->timeout - elapsed);
-             }
-             if (port->sent < port->count && (port->sent == port->received || elapsed < port->timeout)) {
-                 icp = (struct icmp *) buf;
-                 icp->icmp_type = ICMP_ECHO;
-                 icp->icmp_code = 0;
-                 icp->icmp_cksum = 0;
-                 icp->icmp_seq = port->sent;
-                 icp->icmp_id = port->id;
-                 memcpy(&buf[8], &tv, sizeof(struct timeval));
-                 len = size + 8;
-                 icp->icmp_cksum = IcmpChksum((u_short *) icp, len);
-
-                 if (sendto(port->fd, buf, len, 0, (struct sockaddr *) &port->sa, sizeof(port->sa)) != len) {
-                     Ns_Log(Error, "ns_ping: %d/%d: %s: sendto error: %s", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), strerror(errno));
-                     continue;
-                 }
-                 port->sent++;
-                 port->send_time = tv;
-                 port->recv_time.tv_sec = 0;
-                 port->recv_time.tv_usec = 0;
-                 if (debug) {
-                     Ns_Log(Notice, "ns_ping: %d/%d: %s: sending %d of %d, received %d, last send %.2f secs ago", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), port->sent, port->count, port->received, elapsed);
-                 }
-             }
-        }
-
-        // Check the total time we spent pinging
-        if (!maxfd || (wait > 0 && time(0) - start_time > wait)) {
-            break;
-        }
-again:
-        tv.tv_usec = 0;
-        tv.tv_sec = mintime > 0 ? mintime : 1;
-        len = select(maxfd + 1, &fds, 0, 0, &tv);
-
-        if (len < 0) {
-            if ((errno == EINTR || errno == EAGAIN || errno == EINPROGRESS) && ++retries < 2) {
-                if (debug) {
-                    Ns_Log(Notice, "ns_ping: interrupted,  %d retry", retries);
-                }
-                goto again;
-            }
-        }
-
-        for (port = ports; port; port = port->next) {
-            if (!FD_ISSET(port->fd, &fds)) {
-                continue;
-            }
-            gettimeofday(&tv, 0);
-            // Receive reply packet and parse it
-            if ((len = recvfrom(port->fd, buf, sizeof(buf), 0, (struct sockaddr *) &sa, &slen)) <= 0) {
-                Ns_Log(Error, "ns_ping: %d/%d: %s: recvfrom error: %s", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), strerror(errno));
-                continue;
-            }
-            // IP header
-            ip = (struct ip *) buf;
-            if (len < (hlen = ip->ip_hl << 2) + ICMP_MINLEN) {
-                if (debug) {
-                    Ns_Log(Notice, "ns_ping: %d/%d: %s: corrupted packet,  %d", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), len);
-                }
-                continue;
-            }
-            // ICMP header
-            icp = (struct icmp *) (buf + hlen);
-            if (debug) {
-                Ns_Log(Notice, "ns_ping: %d/%d: %s: received from %s %d bytes, type %d, id %d, seq %d, sent %d, received %d", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), inet_ntoa(sa.sin_addr), len, icp->icmp_type, icp->icmp_id, icp->icmp_seq, port->sent, port->received);
-            }
-            // It may come from different host
-            if (port->sa.sin_addr.s_addr != sa.sin_addr.s_addr) {
-                if (debug) {
-                    Ns_Log(Notice, "ns_ping: %d/%d: %s: invalid %s, type %d, last sent %.2f secs ago", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), inet_ntoa(sa.sin_addr), icp->icmp_type, stimediff(port->send_time, tv));
-                }
-                continue;
-            }
-            // Wrong packet
-            if (icp->icmp_type != ICMP_ECHOREPLY || icp->icmp_id != port->id) {
-                if (debug) {
-                    Ns_Log(Notice, "ns_ping: %d/%d: %s: invalid type %d or id %d", port->id, port->fd, ns_inet_ntoa(port->sa.sin_addr), icp->icmp_type, icp->icmp_id);
-                }
-                continue;
-            }
-            port->received++;
-            gettimeofday(&port->recv_time, 0);
-            // Take send time from the ICMP header
-            memcpy(&tv, &buf[hlen + 8], sizeof(struct timeval));
-            // Calculate round trip time
-            elapsed = timediff(tv, port->recv_time);
-            if (!port->rtt_min || elapsed < port->rtt_min) {
-                port->rtt_min = elapsed;
-            }
-            if (!port->rtt_max || elapsed > port->rtt_max) {
-                port->rtt_max = elapsed;
-            }
-            port->rtt_avg = (port->rtt_avg * (port->received - 1) / port->received) + (elapsed / port->received);
-        }
-    }
-
-    // In case of one host, fire exception, no result
-    if (alert && !ports->received && !ports->next) {
-        Tcl_AppendResult(interp, "noConnectivity: no reply from ", ns_inet_ntoa(ports->sa.sin_addr), 0);
-        IcmpUnlock(server, ports);
-        return TCL_ERROR;
-    }
-
-    Tcl_Obj *obj = Tcl_NewListObj(0, 0);
-    Tcl_SetObjResult(interp, obj);
-
-    // Calculate statistics for all ports
-    for (port = ports; port; port = port->next) {
-         if (ports->next) {
-             obj = Tcl_NewListObj(0, 0);
-             Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(ns_inet_ntoa(port->sa.sin_addr), -1));
-             Tcl_ListObjAppendElement(interp, Tcl_GetObjResult(interp), obj);
-         }
-         loss = port->received > 0 ? 100 - ((port->received * 100) / port->sent) : !port->sent ? 0 : 100;
-         Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(port->sent));
-         Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(port->received));
-         Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(loss));
-         Tcl_ListObjAppendElement(interp, obj, Tcl_NewDoubleObj(port->rtt_min));
-         Tcl_ListObjAppendElement(interp, obj, Tcl_NewDoubleObj(port->rtt_avg));
-         Tcl_ListObjAppendElement(interp, obj, Tcl_NewDoubleObj(port->rtt_max));
-    }
-    IcmpUnlock(server, ports);
     return TCL_OK;
 }
 

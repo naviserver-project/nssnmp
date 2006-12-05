@@ -1,3 +1,11 @@
+# Author: Vlad Seryakov vlad@crystalballinc.com
+# March 2006
+
+# Check if the module is enabled
+if {info command ns_mib] == "" } {
+  return	
+}
+
 ns_mib set 1.3 RFC1155-SMI org {} {} 
 ns_mib set 1.3.6 RFC1155-SMI dod {} {} 
 ns_mib set 1.3.6.1 RFC1155-SMI internet {VALUE-ASSIGNEMENT} {} 

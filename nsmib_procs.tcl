@@ -2,7 +2,7 @@
 # March 2006
 
 # Check if the module is enabled
-if {info command ns_mib] == "" } {
+if { [info command ns_mib] == "" } {
   return	
 }
 

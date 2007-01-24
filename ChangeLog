@@ -1,3 +1,8 @@
+2007-01-24 Vlad Seryakov vlad@crystalballinc.com
+
+	* Updated to handle situations with extar .0 at the end
+	of OIDs
+
 2006-11-21 Vlad Seryakov vlad@crystalballinc.com
 
 	* redesigned ns_ping command to support multiple 

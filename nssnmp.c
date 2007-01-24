@@ -1294,9 +1294,6 @@ int SnmpVb::SetValue(char *type, char *value)
 static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST objv[])
 {
     Server *server = (Server *) arg;
-    MibEntry *mib = 0;
-    char *lastOctet = 0;
-    Tcl_HashEntry *entry;
     enum commands {
         cmdLabels, cmdSet, cmdName,
         cmdValue, cmdOid, cmdLabel, cmdModule,
@@ -1307,6 +1304,9 @@ static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST
         "value", "oid", "label", "module",
         "syntax", "info", "hint", 0
     };
+    char lastOctet[128] = "";
+    Tcl_HashEntry *entry;
+    MibEntry *mib = 0;
     int cmd;
 
     if (objc < 2) {
@@ -1395,12 +1395,25 @@ static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST
 
     Ns_MutexLock(&server->mibMutex);
     if (!(entry = Tcl_FindHashEntry(&server->mib, Tcl_GetString(objv[2])))) {
+        char *end, *oid = ns_strdup(Tcl_GetString(objv[2]));
         /* Try without last octet */
-        if ((lastOctet = strrchr(Tcl_GetString(objv[2]), '.'))) {
-            *lastOctet = 0;
-            entry = Tcl_FindHashEntry(&server->mib, Tcl_GetString(objv[2]));
-            *lastOctet = '.';
+        if ((end = strrchr(oid, '.'))) {
+            // Save last part for ns_mib oid command
+            snprintf(lastOctet, sizeof(lastOctet), "%s", end);
+            *end = 0;
+            entry = Tcl_FindHashEntry(&server->mib, oid);
+            /* Sometimes we can see .0.0 at the end */
+            if (!entry) {
+                *end = '.';
+                while (end > oid && (*end == '.' || *end == '0')) end--;
+                if (end > oid) {
+                    snprintf(lastOctet, sizeof(lastOctet), "%s", ++end);
+                    *end = 0;
+                }
+                entry = Tcl_FindHashEntry(&server->mib, oid);
+            }
         }
+        ns_free(oid);
     }
     if (entry) {
         mib = (MibEntry *) Tcl_GetHashValue(entry);
@@ -1479,7 +1492,7 @@ static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST
 
     case cmdOid:
         Tcl_AppendResult(interp, mib->oid, 0);
-        if (lastOctet) {
+        if (lastOctet[0]) {
             Tcl_AppendResult(interp, lastOctet, 0);
         }
         break;

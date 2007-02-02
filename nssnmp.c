@@ -234,6 +234,7 @@ typedef struct _server {
     Ns_Mutex mibMutex;
     struct {
         int port;
+        int thread;
         Snmp *snmp;
         char *proc;
         char *address;
@@ -353,6 +354,9 @@ extern "C" {
         if (!(srvPtr->trap.address = Ns_ConfigGetValue(path, "trap_address"))) {
             srvPtr->trap.address = "0.0.0.0";
         }
+        if (!Ns_ConfigGetInt(path, "trap_thread", &srvPtr->trap.thread)) {
+            srvPtr->trap.thread = 0;
+        }
 
         /* Configure SNMP trap listener */
         if (srvPtr->trap.proc) {
@@ -442,7 +446,11 @@ static int TrapProc(SOCKET sock, void *arg, int why)
         }
         /* Call trap handler if configured */
         if (server->trap.proc) {
-            Ns_ThreadCreate(TrapThread, (void *) ctx, 0, NULL);
+            if (server->trap.thread) {
+                Ns_ThreadCreate(TrapThread, (void *) ctx, 0, NULL);
+            } else {
+                TrapThread(ctx);
+            }
             return NS_TRUE;
         }
     }

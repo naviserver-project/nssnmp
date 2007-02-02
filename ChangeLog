@@ -1,3 +1,7 @@
+2007-02-01 Vlad Seryakov vlad@crystalballinc.com
+
+        * make trap thread creation configurable
+
 2007-01-24 Vlad Seryakov vlad@crystalballinc.com
 
 	* Updated to handle situations with extar .0 at the end
@@ -5,7 +9,7 @@
 
 2006-11-21 Vlad Seryakov vlad@crystalballinc.com
 
-	* redesigned ns_ping command to support multiple 
+	* redesigned ns_ping command to support multiple
         hosts
 
 2006-11-16 Vlad Seryakov vlad@crystalballinc.com

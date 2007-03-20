@@ -42,6 +42,7 @@ snmp_pp:
 	rm -rf snmp++
 	wget -c -O /tmp/snmp++.tar.gz http://www.agentpp.com/snmp++v3.2.21.tar.gz
 	tar -xzf /tmp/snmp++.tar.gz
-	make -C snmp++/src -f Makefile.linux USEROPTS="-g -fPIC -D_NO_SNMPv3" install
+	sed -i 's/\/\/ #define _NO_SNMPv3/#define _NO_SNMPv3/' snmp++/include/snmp_pp/config_snmp_pp.h
+	make -C snmp++/src -f Makefile.linux USEROPTS="-g -fPIC" install
 	rm -rf snmp++
 

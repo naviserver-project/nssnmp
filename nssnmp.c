@@ -551,8 +551,9 @@ static int TrapCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             GenAddress addr;
             ctx->target->get_address(addr);
             char *s, *saddr = (char *) addr.get_printable();
-            if ((s = strchr(saddr, '/')))
+            if ((s = strchr(saddr, '/'))) {
                 *s = 0;
+            }
             Tcl_AppendResult(interp, saddr, 0);
             break;
         }
@@ -982,17 +983,23 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
             for (int i = 3; i < objc - 1; i = i + 2) {
                 if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-port")) {
                     Tcl_GetIntFromObj(interp, objv[i + 1], &port);
-                } else if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-timeout")) {
+                } else
+                if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-timeout")) {
                     Tcl_GetIntFromObj(interp, objv[i + 1], &timeout);
-                } else if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-retries")) {
+                } else
+                if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-retries")) {
                     Tcl_GetIntFromObj(interp, objv[i + 1], &retries);
-                } else if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-version")) {
+                } else
+                if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-version")) {
                     Tcl_GetIntFromObj(interp, objv[i + 1], &version);
-                } else if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-bulk")) {
+                } else
+                if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-bulk")) {
                     Tcl_GetIntFromObj(interp, objv[i + 1], &bulk);
-                } else if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-community")) {
+                } else
+                if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-community")) {
                     community = Tcl_GetString(objv[i + 1]);
-                } else if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-writecommunity")) {
+                } else
+                if (!strcmp(Tcl_GetStringFromObj(objv[i], 0), "-writecommunity")) {
                     writecommunity = Tcl_GetString(objv[i + 1]);
                 }
             }
@@ -1049,27 +1056,33 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
         if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-address")) {
             IpAddress ipaddr = *session->addr;
             Tcl_AppendResult(interp, ipaddr.get_printable(), 0);
-        } else if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-port")) {
+        } else
+        if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-port")) {
             char tmp[32];
             sprintf(tmp, "%d", session->addr->get_port());
             Tcl_AppendResult(interp, tmp, 0);
-        } else if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-community")) {
+        } else
+        if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-community")) {
             OctetStr community;
             session->target.get_readcommunity(community);
             Tcl_AppendResult(interp, community.get_printable(), 0);
-        } else if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-writecommunity")) {
+        } else
+        if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-writecommunity")) {
             OctetStr community;
             session->target.get_writecommunity(community);
             Tcl_AppendResult(interp, community.get_printable(), 0);
-        } else if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-timeout")) {
+        } else
+        if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-timeout")) {
             char tmp[32];
             sprintf(tmp, "%ld", session->target.get_timeout());
             Tcl_AppendResult(interp, tmp, 0);
-        } else if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-version")) {
+        } else
+        if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-version")) {
             char tmp[32];
             sprintf(tmp, "%d", session->target.get_version() + 1);
             Tcl_AppendResult(interp, tmp, 0);
-        } else if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-retries")) {
+        } else
+        if (!strcmp(Tcl_GetStringFromObj(objv[3], 0), "-retries")) {
             char tmp[32];
             sprintf(tmp, "%d", session->target.get_retry());
             Tcl_AppendResult(interp, tmp, 0);
@@ -1109,7 +1122,7 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
                 Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char *) vb.get_printable_oid(), -1));
                 Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(SyntaxStr(vb.get_syntax()), -1));
                 if (vb.get_value(uv) == SNMP_CLASS_SUCCESS) {
-                  Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(uv));
+                  Tcl_ListObjAppendElement(interp, obj, Tcl_NewWideIntObj(uv));
                 } else {
                   Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char *) vb.get_printable_value(), -1));
                 }
@@ -1146,7 +1159,7 @@ static int SnmpCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONS
                     Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj((char *) vb.get_printable_oid(), -1));
                     Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(SyntaxStr(vb.get_syntax()), -1));
                     if (vb.get_value(uv) == SNMP_CLASS_SUCCESS) {
-                      Tcl_ListObjAppendElement(interp, obj, Tcl_NewIntObj(uv));
+                      Tcl_ListObjAppendElement(interp, obj, Tcl_NewWideIntObj(uv));
                     } else {
                       Tcl_ListObjAppendElement(interp, obj, Tcl_NewStringObj(vb.get_printable_value(), -1));
                     }
@@ -1377,11 +1390,13 @@ static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST
                 }
                 for (int i = enumidx; i < objc; i++) {
                     char *s = strchr(Tcl_GetString(objv[i]), '(');
-                    if (!s)
+                    if (!s) {
                         break;
+                    }
                     char *e = strchr(s, ')');
-                    if (!e)
+                    if (!e) {
                         break;
+                    }
                     *s++ = 0;
                     *e = 0;
                     mib->Enum.count++;
@@ -1390,7 +1405,8 @@ static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST
                     mib->Enum.names[mib->Enum.count - 1] = ns_strdup(Tcl_GetString(objv[i]));
                     mib->Enum.values[mib->Enum.count - 1] = atoi(s);
                 }
-            } else if (objc > 6 && Tcl_GetString(objv[6])[0]) {
+            } else
+            if (objc > 6 && Tcl_GetString(objv[6])[0]) {
                 mib->hint = strdup(Tcl_GetString(objv[6]));
             }
             Tcl_SetHashValue(entry, mib);
@@ -1471,7 +1487,8 @@ static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST
             }
             Ns_MutexUnlock(&server->mibMutex);
             return TCL_OK;
-        } else if (!strcmp(mib->syntax, "Integer32")) {
+        } else
+        if (!strcmp(mib->syntax, "Integer32")) {
             if (mib->Enum.count) {
                 int val = atoi(Tcl_GetString(objv[3]));
                 for (int i = 0; i < mib->Enum.count; i++)
@@ -1483,7 +1500,8 @@ static int MibCmd(ClientData arg, Tcl_Interp * interp, int objc, Tcl_Obj * CONST
                 FormatIntTC(interp, Tcl_GetString(objv[3]), mib->hint);
                 return TCL_OK;
             }
-        } else if (!strcmp(mib->syntax, "OCTET STRING") && mib->hint) {
+        } else
+        if (!strcmp(mib->syntax, "OCTET STRING") && mib->hint) {
             FormatStringTC(interp, Tcl_GetString(objv[3]), mib->hint);
             return TCL_OK;
         }
@@ -1546,8 +1564,9 @@ static void FormatStringTC(Tcl_Interp * interp, char *bytes, char *fmt)
         case 'o':
         case 'x':{
                 long vv;
-                for (vv = 0; pfx > 0 && i < len; i++, pfx--)
+                for (vv = 0; pfx > 0 && i < len; i++, pfx--) {
                     vv = vv * 256 + (bytes[i] & 0xff);
+                }
                 switch (*fmt) {
                 case 'd':
                     Ns_DStringPrintf(&ds, "%ld", vv);
@@ -1619,11 +1638,13 @@ static void FormatIntTC(Tcl_Interp * interp, char *bytes, char *fmt)
         }
     case 'b':{
             long i, j = 0, value = atol(bytes);
-            if (value < 0)
+            if (value < 0) {
                 buffer[j++] = '-', value *= -1;
+            }
             for (i = (sizeof(long) * 8 - 1); i > 0 && !(value & (1 << i)); i--);
-            for (; i >= 0; i--, j++)
+            for (; i >= 0; i--, j++) {
                 buffer[j] = value & (1 << i) ? '1' : '0';
+            }
             buffer[j] = 0;
             Tcl_AppendResult(interp, buffer, 0);
             break;

@@ -430,7 +430,7 @@ static int SnmpInterpInit(Tcl_Interp * interp, void *arg)
 static int TrapProc(SOCKET sock, void *arg, int why)
 {
     if (why != NS_SOCK_READ) {
-        close(sock);
+        ns_sockclose(sock);
         return NS_FALSE;
     }
     Server *server = (Server *) arg;

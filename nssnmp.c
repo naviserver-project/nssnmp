@@ -326,10 +326,10 @@ extern "C" {
             srvPtr->gc_interval = 600;
         }
         if (!(srvPtr->community = Ns_ConfigGetValue(path, "community"))) {
-            srvPtr->community = "public";
+            srvPtr->community = (char*)"public";
         }
         if (!(srvPtr->writecommunity = Ns_ConfigGetValue(path, "writecommunity"))) {
-            srvPtr->writecommunity = "private";
+            srvPtr->writecommunity = (char*)"private";
         }
         if (!Ns_ConfigGetInt(path, "port", &srvPtr->port)) {
             srvPtr->port = 161;
@@ -352,7 +352,7 @@ extern "C" {
             srvPtr->trap.port = 162;
         }
         if (!(srvPtr->trap.address = Ns_ConfigGetValue(path, "trap_address"))) {
-            srvPtr->trap.address = "0.0.0.0";
+            srvPtr->trap.address = (char*)"0.0.0.0";
         }
         if (!Ns_ConfigGetInt(path, "trap_thread", &srvPtr->trap.thread)) {
             srvPtr->trap.thread = 0;
@@ -639,25 +639,25 @@ static char *PduTypeStr(int type)
 {
     switch (type) {
     case GET_REQ_MSG:
-        return "GET";
+        return (char*)"GET";
     case GETNEXT_REQ_MSG:
-        return "GETNEXT";
+        return (char*)"GETNEXT";
     case GET_RSP_MSG:
-        return "RESPONSE";
+        return (char*)"RESPONSE";
     case SET_REQ_MSG:
-        return "SET";
+        return (char*)"SET";
     case GETBULK_REQ_MSG:
-        return "GETBULK";
+        return (char*)"GETBULK";
     case INFORM_REQ_MSG:
-        return "INFORM";
+        return (char*)"INFORM";
     case TRP2_REQ_MSG:
-        return "TRAP2";
+        return (char*)"TRAP2";
     case TRP_REQ_MSG:
-        return "TRAP";
+        return (char*)"TRAP";
     case REPORT_MSG:
-        return "REPORT";
+        return (char*)"REPORT";
     default:
-        return "UNKNOWN";
+        return (char*)"UNKNOWN";
     }
 }
 
@@ -681,37 +681,37 @@ static char *SyntaxStr(int type)
 {
     switch (type) {
     case sNMP_SYNTAX_INT32:
-        return "Integer32";
+        return (char*)"Integer32";
     case sNMP_SYNTAX_TIMETICKS:
-        return "TimeTicks";
+        return (char*)"TimeTicks";
     case sNMP_SYNTAX_CNTR32:
-        return "Counter32";
+        return (char*)"Counter32";
     case sNMP_SYNTAX_UINT32:
-        return "Unsigned32";
+        return (char*)"Unsigned32";
     case sNMP_SYNTAX_CNTR64:
-        return "Counter64";
+        return (char*)"Counter64";
     case sNMP_SYNTAX_OCTETS:
-        return "OCTET STRING";
+        return (char*)"OCTET STRING";
     case sNMP_SYNTAX_BITS:
-        return "BITS";
+        return (char*)"BITS";
     case sNMP_SYNTAX_OPAQUE:
-        return "OPAQUE";
+        return (char*)"OPAQUE";
     case sNMP_SYNTAX_IPADDR:
-        return "IpAddress";
+        return (char*)"IpAddress";
     case sNMP_SYNTAX_OID:
-        return "OBJECT IDENTIFIER";
+        return (char*)"OBJECT IDENTIFIER";
     case sNMP_SYNTAX_NULL:
-        return "NULL";
+        return (char*)"NULL";
     case sNMP_SYNTAX_NOSUCHINSTANCE:
-        return "noSuchName";
+        return (char*)"noSuchName";
     case sNMP_SYNTAX_NOSUCHOBJECT:
-        return "noSuchObject";
+        return (char*)"noSuchObject";
     case sNMP_SYNTAX_ENDOFMIBVIEW:
-        return "endOfMibView";
+        return (char*)"endOfMibView";
     case sNMP_SYNTAX_SEQUENCE:
-        return "SEQUENCE";
+        return (char*)"SEQUENCE";
     default:
-        return "UNKNOWN";
+        return (char*)"UNKNOWN";
     }
 }
 

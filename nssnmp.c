@@ -427,7 +427,7 @@ static int SnmpInterpInit(Tcl_Interp * interp, void *arg)
  *----------------------------------------------------------------------
  */
 
-static int TrapProc(SOCKET sock, void *arg, int why)
+static int TrapProc(SOCKET sock, void *arg, unsigned int why)
 {
     if (why != NS_SOCK_READ) {
         ns_sockclose(sock);

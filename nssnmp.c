@@ -243,7 +243,7 @@ typedef struct _server {
 
 class TrapContext {
   public:
-    SOCKET sock;
+    NS_SOCKET sock;
     struct sockaddr_in sa;
     Pdu pdu;
     SnmpTarget *target;
@@ -300,7 +300,7 @@ extern "C" {
 
     NS_EXPORT int Ns_ModuleInit(char *server, char *module) {
         char *path;
-        SOCKET sock;
+        NS_SOCKET sock;
         Server *srvPtr;
         int status;
         static int initialized = 0;
@@ -427,7 +427,7 @@ static int SnmpInterpInit(Tcl_Interp * interp, void *arg)
  *----------------------------------------------------------------------
  */
 
-static int TrapProc(SOCKET sock, void *arg, unsigned int why)
+static bool TrapProc(NS_SOCKET sock, void *arg, unsigned int why)
 {
     if (why != NS_SOCK_READ) {
         ns_sockclose(sock);

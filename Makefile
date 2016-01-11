@@ -15,7 +15,7 @@ MOD      =  nssnmp.so
 #
 # Objects to build.
 #
-OBJS     = nssnmp.o
+MODOBJS     = nssnmp.o
 
 #
 # Library Tcl files

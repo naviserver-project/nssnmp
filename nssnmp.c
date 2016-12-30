@@ -298,7 +298,7 @@ extern "C" {
  *----------------------------------------------------------------------
  */
 
-    NS_EXPORT int Ns_ModuleInit(char *server, char *module) {
+    NS_EXPORT int Ns_ModuleInit(const char *server, const char *module) {
         char *path;
         NS_SOCKET sock;
         Server *srvPtr;
@@ -365,7 +365,7 @@ extern "C" {
                 Ns_Log(Error, "nssnmp: snmp initialization failed: %s", srvPtr->trap.snmp->error_msg(status));
                 return NS_ERROR;
             }
-            if ((sock = Ns_SockListenUdp(srvPtr->trap.address, srvPtr->trap.port)) == -1) {
+            if ((sock = Ns_SockListenUdp(srvPtr->trap.address, srvPtr->trap.port, NS_FALSE)) == -1) {
                 Ns_Log(Error, "nssnmp: couldn't create socket: %s:%d: %s", srvPtr->trap.address, srvPtr->trap.port,
                        strerror(errno));
             } else {

@@ -1585,7 +1585,7 @@ static void FormatStringTC(Tcl_Interp * interp, char *bytes, char *fmt)
                             buf[j] = vv & (1 << i) ? '1' : '0';
                         }
                         buf[j] = 0;
-                        Ns_DStringAppend(&ds, buf);
+                        Tcl_DStringAppend(&ds, buf, TCL_INDEX_NONE);
                         break;
                     }
                 }

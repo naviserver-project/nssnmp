@@ -597,7 +597,7 @@ static void TrapDump(Server * server, Pdu & pdu, SnmpTarget & target)
     Vb vb;
     Oid id, eid;
     TimeTicks tm;
-    Ns_DString ds;
+    Tcl_DString ds;
     GenAddress addr;
 
     target.get_address(addr);
@@ -605,7 +605,7 @@ static void TrapDump(Server * server, Pdu & pdu, SnmpTarget & target)
     pdu.get_notify_enterprise(eid);
     pdu.get_notify_timestamp(tm);
 
-    Ns_DStringInit(&ds);
+    Tcl_DStringInit(&ds);
 
     Ns_DStringPrintf(&ds, "Status %s From %s Uptime %s Enterprise {%s} ID {%s} Type {%s} ",
                      server->trap.snmp->error_msg(pdu.get_error_status()),
@@ -615,8 +615,8 @@ static void TrapDump(Server * server, Pdu & pdu, SnmpTarget & target)
         pdu.get_vb(vb, i);
         Ns_DStringPrintf(&ds, "%s {%s} {%s} ", vb.get_printable_oid(), SyntaxStr(vb.get_syntax()), vb.get_printable_value());
     }
-    Ns_Log(Notice, "nssnmp: %s", Ns_DStringValue(&ds));
-    Ns_DStringFree(&ds);
+    Ns_Log(Notice, "nssnmp: %s", ds.string);
+    Tcl_DStringFree(&ds);
 }
 
 /*
@@ -1539,9 +1539,9 @@ static void FormatStringTC(Tcl_Interp * interp, char *bytes, char *fmt)
 {
     int i = 0, len = strlen(bytes), pfx, have_pfx;
     char *last_fmt;
-    Ns_DString ds;
+    Tcl_DString ds;
 
-    Ns_DStringInit(&ds);
+    Tcl_DStringInit(&ds);
 
     while (*fmt && i < len) {
         last_fmt = fmt;         /* save for loops */
@@ -1555,7 +1555,7 @@ static void FormatStringTC(Tcl_Interp * interp, char *bytes, char *fmt)
         switch (*fmt) {
         case 'a':{
                 int n = (pfx < (len - i)) ? pfx : len - i;
-                Ns_DStringNAppend(&ds, bytes + i, n);
+                Tcl_DStringAppend(&ds, bytes + i, n);
                 i += n;
                 break;
             }
@@ -1597,7 +1597,7 @@ static void FormatStringTC(Tcl_Interp * interp, char *bytes, char *fmt)
         // data is still available.
         if (*fmt && !isdigit((int) *fmt) && *fmt != '*') {
             if (i < len) {
-                Ns_DStringNAppend(&ds, fmt, 1);
+                Tcl_DStringAppend(&ds, fmt, 1);
             }
             fmt++;
         }
@@ -1605,8 +1605,8 @@ static void FormatStringTC(Tcl_Interp * interp, char *bytes, char *fmt)
             fmt = last_fmt;
         }
     }
-    Tcl_AppendResult(interp, Ns_DStringValue(&ds), 0);
-    Ns_DStringFree(&ds);
+    Tcl_AppendResult(interp, ds.string, 0);
+    Tcl_DStringFree(&ds);
 }
 
 static void FormatIntTC(Tcl_Interp * interp, char *bytes, char *fmt)

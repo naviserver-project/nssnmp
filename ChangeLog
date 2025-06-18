@@ -1,136 +1,378 @@
-2007-02-01 Vlad Seryakov vlad@crystalballinc.com
+commit d06498bf537740ca087fc264f3df0913f83dffda
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-12-30
 
-        * make trap thread creation configurable
+    - adjust to interface changes
 
-2007-01-24 Vlad Seryakov vlad@crystalballinc.com
+M	nssnmp.c
 
-	* Updated to handle situations with extar .0 at the end
-	of OIDs
+commit 738af71ac14d0b1d119e1364c8b5b5b18c449c49
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-01-11
 
-2006-11-21 Vlad Seryakov vlad@crystalballinc.com
+    - use NS_SOCKET instead of SOCKET
 
-	* redesigned ns_ping command to support multiple
-        hosts
+M	nssnmp.c
 
-2006-11-16 Vlad Seryakov vlad@crystalballinc.com
+commit 474f991e12be2c8597b025919a4f8bdce72dec33
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2016-01-11
 
-	* Fixed bug in command parser
+    - use actual conventions
 
-2006-07-19 Vlad Seryakov vlad@crystalballinc.com
+M	Makefile
 
-        * Updated to the latest snmp++ library
+commit a531710104cf598b8471c9bf16fccd76c263ba79
+Author: Gustaf Neumann <neumann@wu-wien.ac.at>
+Date:   2014-09-29
 
-2006-03-21 Vlad Seryakov vlad@crystalballinc.com
+    - adjust types
 
-	* Added syslog server support
+M	nssnmp.c
 
-2006-03-17 Vlad Seryakov vlad@crystalballinc.com
+commit d7c965b6973dd57572f6d1be53fb672b3824a4df
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-03-26
 
-	* Removed ns_udp, it is handled by ns_udp module now
-	* Updated RADIUS support, added users, dictionary values
+    Minor updates to compile with recent Tcl
 
-2006-01-05 Vlad Seryakov vlad@crystalballinc.com
+M	nssnmp.c
 
-	* added debug option to snmp traps
+commit 5d339b016431ef3f97b4a2d170007ddeea6c41cd
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2008-02-07
 
-2005-11-21 Vlad Seryakov vlad@crystalballinc.com
+    Use ns_sockclose for closing sockets for Windows port
 
-	* fixed icmp id overload condition
+M	nssnmp.c
 
-2005-08-01 Vlad Seryakov vlad@crystalballinc.com
+commit b24fabdd6e1b85433d0c72b9e934d4a296043b0f
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2007-05-01
 
-	* removed old compat functions
+    Use long integers for counter32 types
 
-2005-07-21 Vlad Seryakov vlad@crystalballinc.com
+M	nssnmp.c
 
-	* fixed timeout bug in ns_ping
+commit 9800f95e128714ee4a2726569dd586496d655aa2
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2007-03-20
 
-2005-06-09 Vlad Seryakov vlad@crystalballinc.com
+    Compile snmp++ with option in the header file instead of in makefile
 
-	* Rewrite ns_udp using new Objv interface
+M	Makefile
 
-2004-10-15 Vlad Seryakov vlad@crystalballinc.com
+commit a602320d468258a870bc83c96e9e311bcdd2c37a
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2007-03-15
 
-	* Added trap and inform to ns_snmp, ns_udp commands
+    Add -fPIC to build
 
-2004-09-29 Vlad Seryakov vlad@crystalballinc.com
+M	Makefile
 
-	* Added nsmibdump utility
+commit 1429822e22b2e4439fb2cf8fd67c64d4ac9dbb58
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2007-02-02
 
-2004-09-19 Vlad Seryakov vlad@crystalballinc.com
+    Make trap thread creation configurable
 
-	* Added RADIUS client and server support
+M	nssnmp.c
 
-2004-06-10 Vlad Seryakov vlad@crystalballinc.com
+commit 3ea74ca6a6192362ddbd421d31ea57c65427a7dd
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2007-01-24
 
-	* updated to support Snmp++ version 3.2+
+    Updated to handle situations with extra .0 at the end of OIDs
 
-2004-02-23 Vlad Seryakov vlad@crystalballinc.com
+M	nssnmp.c
 
-	* ns_ping crashes due to bad result formatting
+commit 96e8fa83609969bd2fc3c52982b051c408fc816b
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-12-29
 
-2003-07-30 Vlad Seryakov vlad@crystalballinc.com
+    Syntax error in tcl init file
 
-	* ns_ping fixes
+M	nsmib_procs.tcl
 
-2003-06-18 Vlad Seryakov vlad@crystalballinc.com
+commit 7d11a5f1b0fd2d6924a0b42849c9f638bcca979a
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-12-05
 
-	* Minor changes, new binder for aolserver4.
+    Minor changes to make installation work and smoothed some edges
 
-2003-05-08 Scott Goodwin  <scott@scottg.net>
+M	nsmib_procs.tcl
 
-        * Initial import into AOLserver SourceForge CVS
+commit 0b4e0d2b3a58d80dfcb6def40ab1c1ae92fc686a
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-11-24
 
-2003-04-20 Vlad Seryakov vlad@crystalballinc.com
+    Split snmp and icmp  modules
 
-	* Aolserver 4 support.
+M	nssnmp.c
 
-2002-10-04 Vlad Seryakov vlad@crystalballinc.com
+commit 38e29eab326fe7d265d584b011c5b388745af5eb
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-11-22
 
-	* Extended config command with -writecommunity option.
+    Redesign ns_ping to support multiple hosts
 
-2002-07-29 Vlad Seryakov vlad@crystalballinc.com
+M	nssnmp.c
 
-	* Fixed bug in session destroy code.
+commit eb9e2edbb069dfa992dfb5a5bea8a0354182adb4
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-11-16
 
-2002-05-24 Vlad Seryakov vlad@crystalballinc.com
+    Fix bug in crashing ns_snmp command without proper arguments
 
-	* Added garbage collector and sessions commands.
+M	nssnmp.c
 
-2002-04-20 Vlad Seryakov vlad@crystalballinc.com
+commit 521bfea6db0145c4d80d405b425bad5ce32b6de2
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-11-07
 
-	* Bugfixes in walk procedure
+    Return integer value if possible, timeticks specifically
 
-2001-12-27 Vlad Seryakov vlad@crystalballinc.com
+M	nssnmp.c
 
-	* Added trap handler example procedure
+commit 9fa094e39900f4aa32247de505a8a4f636ffd143
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-07-19
 
-2001-12-18 Vlad Seryakov vlad@crystalballinc.com
+    Update to the latest snmp++ library
 
-	* Fixed bug in walk error handling
+M	Makefile
+M	nssnmp.c
 
-2001-12-10 Vlad Seryakov vlad@crystalballinc.com
+commit 236324ab702dbf2fe05d2cc83955f451e1c0ad38
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-06-19
 
-	* Fixed bug in handling Display-Hint
+    Automatically compile snmp++ library
 
-2001-12-06 Vlad Seryakov vlad@crystalballinc.com
+M	Makefile
+M	README
 
-	* Added Display-Hint support, ns_mib set format has been changed,
-	  requires re-creation of nsmib-procs.tcl file.
+commit 4b3d6231e33f2eddab1de915901f3979e2c75a00
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-05-02
 
-2001-12-04 Vlad Seryakov vlad@crystalballinc.com
+    Code reformatting according to Naviserver style
 
-	* Compilation problems with Linux and Solaris(Nikolay Blyumberg nickb@cv.net)
+M	nssnmp.c
 
-2001-10-31 Vlad Seryakov vlad@crystalballinc.com
+commit 9e09b04c4f66a05fa2b1682e2bcac890bcc4eff5
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-22
 
-	* Fixes in ICMP requests
+    Move RADIUS and Syslog server into own modules
 
-2001-10-25 Vlad Seryakov vlad@crystalballinc.com
+M	Makefile
+M	README
+D	nsradius_procs.tcl
+M	nssnmp.c
+D	syslog_procs.tcl
 
-	* ICMP echo requests and ns_ping command are added
+commit efab7759fa3829fc1223bc10157d96e6d600594a
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-22
 
-2001-10-15 Vlad Seryakov vlad@crystalballinc.com
+    Multiple syslog files support
 
-	* Fixes in documentation
-	* added tnm_export routine to create ns_mib entries using scotty
+M	Makefile
+M	nssnmp.c
+A	syslog_procs.tcl
+
+commit fd2052fc16ff4283cc7996d26fb665acc3900f5e
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-21
+
+    Ignore timestamp in syslog lines
+
+M	nssnmp.c
+
+commit ef3b54c9940107b6c7c79e77cb98238ea69bfea6
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-21
+
+    Error handling to prevent log overflows
+
+M	nssnmp.c
+
+commit 4047a188f87145b6b08ba716f2bfdd495b3ca084
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-21
+
+    Add DGRAM socket types for Unix domain sockets
+
+M	README
+M	nsradius_procs.tcl
+M	nssnmp.c
+
+commit 4b4b875ccc741f91b44cfcd5f9e13379b29e204b
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-21
+
+    Minor additions to RADIUS server
+
+M	nsradius_procs.tcl
+M	nssnmp.c
+
+commit feffd4d1eca544d96a2d87215fdb81023f7c4a6f
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-18
+
+    Move ns_udp to seperate module
+
+M	Makefile
+M	README
+M	nssnmp.c
+
+commit c433080f1716b89f6ec88443511ed74c9b50c09f
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-18
+
+    RADIUS server completion, full dictinary support
+
+M	nsradius_procs.tcl
+M	nssnmp.c
+
+commit be3bcca29214586dab16d441710e4a0c7124a03f
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-18
+
+    Finalize native crypt usage for Linux systems
+
+M	nsradius_procs.tcl
+
+commit 4742779d7a003ee234c3439e14da4338f9998157
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-18
+
+    For Linux systems use native crypt which supports MD5 digests; increase encryption buffer
+
+M	nssnmp.c
+
+commit 952732117605222aade0d39ce93e16479951d1e8
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-03-18
+
+    Big RADIUS rewrite, server and user support
+
+M	Makefile
+M	nsradius_procs.tcl
+M	nssnmp.c
+
+commit b77918f245c2749d2d98617c1a235b6d8409e331
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-02-10
+
+    Ignore hint in ns_mib set when enums are specified
+
+M	nssnmp.c
+
+commit 9ce5c0644fb67c003c4b874c745e669561597efb
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-01-24
+
+    Use new Ns_Sock timeout API
+
+M	nssnmp.c
+
+commit 459bfd7e02a5e6cf8839b4a04fd9a70c7935b812
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2006-01-05
+
+    Add debug config option to SNMP traps
+
+M	nssnmp.c
+
+commit 786369eaffd9c864332af4a51cfb28eba85d3022
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-11-21
+
+    Fix ICMP ID overload condition
+
+M	nssnmp.c
+
+commit 3174d1e4979585cd5892639ff3c5d64c15c2a391
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-08-07
+
+    Add support for broadcasting to all udp commands
+
+M	nssnmp.c
+
+commit 97e57e96e13355e046e702eaa49f3569406895fd
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-08-01
+
+    Don't use depreciated naviserver routines
+
+M	nssnmp.c
+
+commit c0a9fffb257a789f5a7c3b6f1bf14852e7bd6fe3
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-07-21
+
+    Use time_t in ping command
+
+M	nssnmp.c
+
+commit 314c617e7884740651ec1449f2d43246c1a40500
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-07-21
+
+    Fix timeout bug in ns_ping
+
+M	nssnmp.c
+
+commit 04a135ce510efb737c8c3acc37f2074a6090f0fa
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-06-29
+
+    Remove stray aolserver includes from build
+
+M	Makefile
+
+commit 850f7b52c18ea7f47e569bacac94875cd1064022
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-06-12
+
+    Silence some compiler warnings
+
+M	nssnmp.c
+
+commit 85662800a0dd65b5a382f4d3799ed2d44d0060ee
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-06-09
+
+    Use Objv interface for parsing Tcl command options
+
+M	README
+M	nssnmp.c
+
+commit 99c43775b62c7a12bfc74da34a29e51cfce6192a
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-06-08
+
+    Add Mozilla license file; update wording in README
+
+A	LICENSE
+M	README
+M	nsmibdump.c
+M	nssnmp.c
+
+commit b0dedb03a127bf36b8bba633f991bd754016357b
+Author: Vlad Seryakov <vlad@crystalballinc.com>
+Date:   2005-05-20
+
+    Initial revision
+
+A	Makefile
+A	README
+A	example.tcl
+A	nsmib_procs.tcl
+A	nsmibdump.c
+A	nsradius_procs.tcl
+A	nssnmp.c
+A	tnm_export.tcl
